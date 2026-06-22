@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Deploy locally built mybot-codex to the VPS and run only this dry-run strategy.
+#
+# Usage:
+#   scripts/deploy-vps.sh [ssh-host]
+set -euo pipefail
+
+SSH_HOST="${1:-dubolin-vps}"
+SSH_CONFIG="${SSH_CONFIG:-/mnt/c/Users/Tedy/.ssh/config}"
+LOCAL_BIN="${LOCAL_BIN:-target/release/mybot-codex}"
+SERVICE="mybot-codex"
+DATA_DIR="/opt/mybot-codex"
+REMOTE_BIN="/usr/local/bin/mybot-codex"
+
+if [ ! -x "$LOCAL_BIN" ]; then
+  echo "missing executable binary: $LOCAL_BIN" >&2
+  echo "run: cargo build --release" >&2
+  exit 1
+fi
+
+local_hash="$(sha256sum "$LOCAL_BIN" | awk '{print $1}')"
+remote_tmp="/tmp/mybot-codex-${local_hash:0:12}"
+
+echo "[1/5] local binary"
+echo "  path: $LOCAL_BIN"
+echo "  sha256: $local_hash"
+
+echo "[2/5] upload binary and installer"
+scp -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 "$LOCAL_BIN" "$SSH_HOST:$remote_tmp"
+scp -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 scripts/install-systemd.sh "$SSH_HOST:/tmp/install-mybot-codex.sh"
+
+echo "[3/5] install service and stop old jy-bot"
+ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 "$SSH_HOST" \
+  "REMOTE_TMP='$remote_tmp' REMOTE_BIN='$REMOTE_BIN' DATA_DIR='$DATA_DIR' SERVICE='$SERVICE' EXPECTED_HASH='$local_hash' bash -s" <<'REMOTE'
+set -euo pipefail
+
+actual_hash="$(sha256sum "$REMOTE_TMP" | awk '{print $1}')"
+if [ "$actual_hash" != "$EXPECTED_HASH" ]; then
+  echo "hash mismatch after upload" >&2
+  echo "expected: $EXPECTED_HASH" >&2
+  echo "actual:   $actual_hash" >&2
+  exit 1
+fi
+
+stamp="$(date -u +%Y%m%d-%H%M%S)"
+if [ -f "$REMOTE_BIN" ]; then
+  cp -a "$REMOTE_BIN" "${REMOTE_BIN}.bak-${stamp}"
+fi
+install -m 755 "$REMOTE_TMP" "$REMOTE_BIN"
+chmod +x /tmp/install-mybot-codex.sh
+/tmp/install-mybot-codex.sh "$DATA_DIR" "$SERVICE" "$REMOTE_BIN"
+
+if systemctl list-unit-files jy-bot.service >/dev/null 2>&1; then
+  systemctl stop jy-bot.service || true
+fi
+systemctl restart "$SERVICE"
+sleep 2
+
+echo "binary:"
+sha256sum "$REMOTE_BIN"
+echo "service:"
+systemctl show "$SERVICE.service" -p ActiveState -p SubState -p MainPID -p MemoryCurrent -p MemoryPeak -p NRestarts
+echo "old jy-bot:"
+systemctl show jy-bot.service -p ActiveState -p SubState -p MainPID 2>/dev/null || true
+echo "safe env:"
+grep -nE '^(DRY_RUN|MARKET_SLUG_PREFIX|POLL_MS|T1_LATE_[A-Z0-9_]+|REST_FALLBACK_TIMEOUT_MS)=' "$DATA_DIR/.env"
+REMOTE
+
+echo "[4/5] journal"
+ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 "$SSH_HOST" \
+  "journalctl -u ${SERVICE}.service --since '3 minutes ago' --no-pager | tail -80"
+
+echo "[5/5] recent signals"
+ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 "$SSH_HOST" \
+  "tail -80 ${DATA_DIR}/data/t1_late_signals.jsonl 2>/dev/null || true"
+

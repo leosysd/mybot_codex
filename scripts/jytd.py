@@ -64,7 +64,6 @@ def load_state(path: Path | str) -> list[dict[str, Any]]:
     else:
         p = Path(path)
         if not p.exists():
-            print(f"ℹ 暂无数据文件 {p}")
             return []
         text = p.read_text(encoding="utf-8", errors="replace")
     if not text.strip():
@@ -189,7 +188,10 @@ def main() -> int:
     state_path = resolve_state_path(env_path, args.state or None)
     trades = load_state(state_path)
     if not trades:
-        print("ℹ 暂无交易记录")
+        if state_path != "-" and not Path(state_path).exists():
+            print(f"ℹ 暂无数据文件 {state_path}")
+        else:
+            print("ℹ 暂无交易记录")
         return 0
 
     rows, stats = build_rows(trades)

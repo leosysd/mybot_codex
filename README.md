@@ -23,6 +23,15 @@ cargo run --release -- .env
 
 Signals are written to `data/t1_late_signals.jsonl`.
 
+On the VPS, `scripts/deploy-vps.sh` also installs:
+
+```bash
+jytd
+```
+
+`jytd` prints the same style trading stats table as the old bot, reading
+`/opt/mybot-codex/data/t1_late_state.json` by default.
+
 The default is `DRY_RUN=1`. With `DRY_RUN=0`, the bot uses the official Polymarket CLOB V2 SDK to authenticate and send FAK buy orders through the same `buy_fak` path used by dry-run simulation. Do not switch this on until dry-run tail evidence is stable.
 
 ## Current Historical Context

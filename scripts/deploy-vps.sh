@@ -29,6 +29,7 @@ echo "  sha256: $local_hash"
 echo "[2/5] upload binary and installer"
 scp -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 "$LOCAL_BIN" "$SSH_HOST:$remote_tmp"
 scp -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 scripts/install-systemd.sh "$SSH_HOST:/tmp/install-mybot-codex.sh"
+scp -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 scripts/jytd.py "$SSH_HOST:/tmp/jytd.py"
 
 echo "[3/5] install/restart mybot-codex service"
 ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 "$SSH_HOST" \
@@ -48,6 +49,7 @@ if [ -f "$REMOTE_BIN" ]; then
   cp -a "$REMOTE_BIN" "${REMOTE_BIN}.bak-${stamp}"
 fi
 install -m 755 "$REMOTE_TMP" "$REMOTE_BIN"
+install -m 755 /tmp/jytd.py /usr/local/bin/jytd
 chmod +x /tmp/install-mybot-codex.sh
 /tmp/install-mybot-codex.sh "$DATA_DIR" "$SERVICE" "$REMOTE_BIN"
 
@@ -56,6 +58,8 @@ sleep 2
 
 echo "binary:"
 sha256sum "$REMOTE_BIN"
+echo "jytd:"
+ls -l /usr/local/bin/jytd
 echo "service:"
 systemctl show "$SERVICE.service" -p ActiveState -p SubState -p MainPID -p MemoryCurrent -p MemoryPeak -p NRestarts
 echo "existing jy-bot left untouched:"

@@ -75,6 +75,16 @@ def since_filter(rows: list[dict[str, Any]], hours: float) -> list[dict[str, Any
     return [r for r in rows if int(r.get("ts") or 0) >= cutoff]
 
 
+def since_last_service_start(rows: list[dict[str, Any]], enabled: bool) -> list[dict[str, Any]]:
+    if not enabled:
+        return rows
+    starts = [int(r.get("ts") or 0) for r in rows if r.get("phase") == "service_start"]
+    if not starts:
+        return rows
+    cutoff = max(starts)
+    return [r for r in rows if int(r.get("ts") or 0) >= cutoff]
+
+
 def fmt_money(value: Any) -> str:
     try:
         return f"{float(value):+.2f}"
@@ -84,6 +94,22 @@ def fmt_money(value: Any) -> str:
 
 def pct(num: int, den: int) -> str:
     return f"{num / den * 100:.1f}%" if den else "0.0%"
+
+
+def as_float(value: Any) -> float | None:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if num == num else None
+
+
+def quantile(values: list[float], q: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    idx = int((len(ordered) - 1) * q)
+    return ordered[idx]
 
 
 def print_counter(title: str, counter: collections.Counter[str], limit: int = 20) -> None:
@@ -110,18 +136,33 @@ def summarize_trades(trades: list[dict[str, Any]]) -> None:
     by_strategy: collections.Counter[str] = collections.Counter()
     by_tier: collections.Counter[str] = collections.Counter()
     tier_pnl: collections.defaultdict[str, float] = collections.defaultdict(float)
+    tier_bps: collections.defaultdict[str, list[float]] = collections.defaultdict(list)
     for trade in trades:
         strategy = str(trade.get("strategy") or "unknown")
         tier = str(trade.get("tier") or "-")
+        key = f"{strategy}:{tier}"
         by_strategy[strategy] += 1
-        by_tier[f"{strategy}:{tier}"] += 1
+        by_tier[key] += 1
         if trade.get("pnl") is not None:
-            tier_pnl[f"{strategy}:{tier}"] += float(trade.get("pnl") or 0)
+            tier_pnl[key] += float(trade.get("pnl") or 0)
+        bps = as_float(trade.get("btc_from_start_bps"))
+        if bps is not None:
+            tier_bps[key].append(bps)
     print_counter("按策略/层级笔数", by_tier)
     if tier_pnl:
         print("\n按层级已结算 PnL")
         for key, value in sorted(tier_pnl.items(), key=lambda item: item[1]):
             print(f"  {key.ljust(32)} {value:+.2f}")
+    if tier_bps:
+        print("\n按层级 BTC 入场涨跌 bp")
+        for key, values in sorted(tier_bps.items()):
+            abs_values = [abs(v) for v in values]
+            avg = sum(values) / len(values)
+            print(
+                f"  {key.ljust(32)} count={len(values)} "
+                f"avg={avg:+.2f} abs_p50={quantile(abs_values, 0.50):.2f} "
+                f"abs_p95={quantile(abs_values, 0.95):.2f}"
+            )
 
 
 def summarize_signals(rows: list[dict[str, Any]]) -> None:
@@ -135,6 +176,8 @@ def summarize_signals(rows: list[dict[str, Any]]) -> None:
     submit_by_status = collections.Counter()
     entries_by_tier = collections.Counter()
     btc_age_values: list[float] = []
+    btc_bps_values: list[float] = []
+    btc_bps_by_tier: collections.defaultdict[str, list[float]] = collections.defaultdict(list)
     for row in rows:
         phase = row.get("phase")
         if phase in {"btc_oracle_block", "btc_distance_block", "t1_late_block"}:
@@ -148,12 +191,16 @@ def summarize_signals(rows: list[dict[str, Any]]) -> None:
         if phase in {"btc_oracle_book_missing", "t1_late_book_missing"}:
             book_missing_by_sec[str(row.get("seconds_left") or "-")] += 1
         if phase == "intent" and row.get("label") == "btc_oracle_fallback_entry":
-            intents_by_tier[str(row.get("tier") or "-")] += 1
+            tier = str(row.get("tier") or "-")
+            intents_by_tier[tier] += 1
             if row.get("btc_price_age_ms") is not None:
-                try:
-                    btc_age_values.append(float(row["btc_price_age_ms"]))
-                except (TypeError, ValueError):
-                    pass
+                age = as_float(row.get("btc_price_age_ms"))
+                if age is not None:
+                    btc_age_values.append(age)
+            bps = as_float(row.get("btc_from_start_bps"))
+            if bps is not None:
+                btc_bps_values.append(bps)
+                btc_bps_by_tier[tier].append(bps)
         if phase == "submit" and row.get("label") == "btc_oracle_fallback_entry":
             submit_by_status[f"{row.get('status') or '-'}:{row.get('success')}"] += 1
         if phase == "btc_oracle_fallback_entry":
@@ -171,6 +218,22 @@ def summarize_signals(rows: list[dict[str, Any]]) -> None:
         p95 = values[int(len(values) * 0.95) if len(values) > 1 else 0]
         print("\nBTC tick age on intent")
         print(f"  count={len(values)} p50={p50:.0f}ms p95={p95:.0f}ms max={max(values):.0f}ms")
+    if btc_bps_values:
+        abs_values = [abs(v) for v in btc_bps_values]
+        print("\nBTC move on oracle intent")
+        print(
+            f"  count={len(btc_bps_values)} "
+            f"min={min(btc_bps_values):+.2f}bp max={max(btc_bps_values):+.2f}bp "
+            f"abs_p50={quantile(abs_values, 0.50):.2f}bp "
+            f"abs_p95={quantile(abs_values, 0.95):.2f}bp"
+        )
+        for tier, values in sorted(btc_bps_by_tier.items()):
+            abs_tier = [abs(v) for v in values]
+            print(
+                f"  {tier.ljust(12)} count={len(values)} "
+                f"avg={sum(values) / len(values):+.2f}bp "
+                f"abs_p50={quantile(abs_tier, 0.50):.2f}bp"
+            )
 
 
 def print_recent(rows: list[dict[str, Any]], limit: int) -> None:
@@ -199,6 +262,11 @@ def main() -> int:
     ap.add_argument("--hours", type=float, default=24.0, help="0 means all loaded signals")
     ap.add_argument("--max-lines", type=int, default=200_000)
     ap.add_argument("--recent", type=int, default=12)
+    ap.add_argument(
+        "--all-starts",
+        action="store_true",
+        help="include signals before the latest service_start marker",
+    )
     args = ap.parse_args()
 
     env_path = Path(args.env)
@@ -208,7 +276,9 @@ def main() -> int:
         env_path, env, "SIGNAL_FILE", "/opt/mybot-codex/data/t1_late_signals.jsonl"
     )
     trades = load_state(state_path)
-    signals = since_filter(iter_jsonl(signal_path, args.max_lines), args.hours)
+    loaded_signals = iter_jsonl(signal_path, args.max_lines)
+    signals = since_filter(loaded_signals, args.hours)
+    signals = since_last_service_start(signals, not args.all_starts)
 
     print("mybot-codex 诊断")
     print(f"  env={env_path}")
@@ -216,7 +286,7 @@ def main() -> int:
     print(f"  dry_run={env.get('DRY_RUN', '-')}")
     print(f"  state={state_path}")
     print(f"  signals={signal_path}")
-    print(f"  signal_rows={len(signals)} hours={args.hours:g}")
+    print(f"  signal_rows={len(signals)} hours={args.hours:g} since_latest_start={not args.all_starts}")
     if env.get("STRATEGY") == "btc_oracle_fallback":
         print("  oracle_profile=" + env.get("BTC_ORACLE_PROFILE", "-"))
         print(

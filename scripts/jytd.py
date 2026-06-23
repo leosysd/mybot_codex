@@ -159,6 +159,7 @@ def build_rows(trades: list[dict[str, Any]]) -> tuple[list[list[str]], dict[str,
                     fmt_num(trade.get("shares"), 0),
                     fmt_num(trade.get("cost") or trade.get("total_cost"), 2),
                     phase,
+                    fmt_num(trade.get("btc_from_start_bps"), 2, signed=True),
                     result,
                     pnl_text,
                 ]
@@ -206,7 +207,7 @@ def main() -> int:
         return 0
 
     rows, stats = build_rows(trades)
-    headers = ["盘口时间", "秒", "方向", "价格", "份额", "成本", "阶段", "结果", "盈亏"]
+    headers = ["盘口时间", "秒", "方向", "价格", "份额", "成本", "阶段", "BTC涨跌bp", "结果", "盈亏"]
     render_table(headers, rows)
 
     settled = stats["settled"]

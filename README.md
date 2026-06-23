@@ -228,6 +228,9 @@ jydiag
 ```
 
 `jydiag` 会统计最近 24 小时信号：phase 计数、Candidate B 的 block 原因、tier reject、缺 ask 秒点、intent/submit/entry 数量、BTC tick age，以及按层级 PnL。
+默认只统计最近一次 `service_start` 之后的信号；需要包含旧启动周期时加 `--all-starts`。
+`jytd` 交易统计表会显示每笔 `BTC涨跌bp`，也就是入场时 BTC 相对本盘开盘价的涨跌幅；正数买 Up，负数买 Down。
+`jydiag` 会额外汇总各 tier 的 BTC 入场涨跌 bp，方便检查策略是不是真的在按 BTC 偏离强弱下单。
 
 重启新机器人:
 
@@ -553,7 +556,7 @@ jydiag --hours 4
 看全部已加载信号:
 
 ```bash
-jydiag --hours 0
+jydiag --hours 0 --all-starts
 ```
 
 ## 实盘前检查

@@ -71,6 +71,14 @@ async fn main() -> Result<()> {
     let _btc_task = btc_ws.run();
     let executor = Arc::new(OrderExecutor::new(&cfg).await?);
     let mut bot = Bot::new(cfg, cache, ws, btc_price, executor).await?;
+    bot.signal(json!({
+        "phase": "service_start",
+        "strategy": bot.cfg.strategy,
+        "dry_run": bot.cfg.dry_run,
+        "btc_oracle_tiers": bot.cfg.btc_oracle_tiers.len(),
+        "ts": Utc::now().timestamp(),
+    }))
+    .await?;
     let poll = tokio::time::Duration::from_millis(bot.cfg.poll_ms);
 
     loop {

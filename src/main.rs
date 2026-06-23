@@ -1195,7 +1195,7 @@ impl Bot {
         {
             let cache = self.cache.read().await;
             if let Some(book) = cache.get(token_id) {
-                if book.best_ask().is_some() || book.best_bid().is_some() {
+                if book.best_ask().is_some() || (book.best_bid().is_some() && !allow_rest) {
                     return TopQuote {
                         ask: book.best_ask(),
                         ask_size: book.best_ask_size(),

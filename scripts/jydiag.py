@@ -178,6 +178,7 @@ def summarize_signals(rows: list[dict[str, Any]]) -> None:
     btc_age_values: list[float] = []
     btc_bps_values: list[float] = []
     btc_bps_by_tier: collections.defaultdict[str, list[float]] = collections.defaultdict(list)
+    btc_ret_values: dict[str, list[float]] = {"ret3": [], "ret5": [], "ret10": []}
     for row in rows:
         phase = row.get("phase")
         if phase in {"btc_oracle_block", "btc_distance_block", "t1_late_block"}:
@@ -201,6 +202,14 @@ def summarize_signals(rows: list[dict[str, Any]]) -> None:
             if bps is not None:
                 btc_bps_values.append(bps)
                 btc_bps_by_tier[tier].append(bps)
+            for label, field in (
+                ("ret3", "btc_ret_3s_bps"),
+                ("ret5", "btc_ret_5s_bps"),
+                ("ret10", "btc_ret_10s_bps"),
+            ):
+                value = as_float(row.get(field))
+                if value is not None:
+                    btc_ret_values[label].append(value)
         if phase == "submit" and row.get("label") == "btc_oracle_fallback_entry":
             submit_by_status[f"{row.get('status') or '-'}:{row.get('success')}"] += 1
         if phase == "btc_oracle_fallback_entry":
@@ -233,6 +242,17 @@ def summarize_signals(rows: list[dict[str, Any]]) -> None:
                 f"  {tier.ljust(12)} count={len(values)} "
                 f"avg={sum(values) / len(values):+.2f}bp "
                 f"abs_p50={quantile(abs_tier, 0.50):.2f}bp"
+            )
+    if any(btc_ret_values.values()):
+        print("\nBTC recent move on oracle intent")
+        for label, values in btc_ret_values.items():
+            if not values:
+                continue
+            abs_values = [abs(v) for v in values]
+            print(
+                f"  {label.ljust(5)} count={len(values)} "
+                f"min={min(values):+.2f}bp max={max(values):+.2f}bp "
+                f"abs_p50={quantile(abs_values, 0.50):.2f}bp"
             )
 
 

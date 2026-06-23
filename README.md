@@ -357,9 +357,16 @@ Candidate B 参数。
 - `ask`: 选中方向最高可吃 ask。
 - `spread`: 选中方向最大 ask-bid spread；`none` 表示不检查。
 - `frac`: 这一档最多使用当盘预算的比例。
+- `ret3` / `ret5` / `ret10`: 可选短动量过滤。以选中方向为准，例如买 Up 时 `ret5=0.5` 表示最近 5 秒 BTC 至少上涨 0.5bp；买 Down 时表示最近 5 秒 BTC 至少下跌 0.5bp。不填写则不检查。
 - `BTC_ORACLE_RISK_FRACTION=0.25`: 每盘最多用当前 dry-run 权益的 25%。
 - `BTC_ORACLE_MAX_DEPLOY_USDC=270`: 每个盘口硬上限 270u。
 - `BTC_ORACLE_DAILY_TAKE_PROFIT=800`: 当天已结算 dry-run PnL 到 800u 后停止当天新开仓。
+
+Candidate C 回测候选示例，在 Candidate B 前增加 T-15 短动量提前层，尚未作为默认配置：
+
+```text
+BTC_ORACLE_PROFILE=label=t15_momo,sec=15,bps=5,ask=0.98,spread=0.10,frac=1,ret3=0,ret5=0.5;label=e8_strong,sec=8,bps=5,ask=0.95,spread=none,frac=1;label=e8_normal,sec=8,bps=0.5,ask=0.93,spread=none,frac=0.75;label=e5_strong,sec=5,bps=1.5,ask=0.98,spread=0.10,frac=1;label=e5_cheap,sec=5,bps=0.2,ask=0.85,spread=0.10,frac=0.75;label=e3_final,sec=3,bps=0,ask=0.95,spread=none,frac=1
+```
 
 ```text
 BTC_DISTANCE_TAIL_MAX_SECS=2
@@ -436,7 +443,7 @@ src/main.rs
 - `Config`: 从 `.env` 读取所有配置。
 - `ClobClient`: 通过 REST 查当前 BTC 5m 市场、盘口、结算赢家。
 - `MarketWs`: 连接 Polymarket market WebSocket，维护顶档盘口缓存。
-- `BtcPriceWs`: 订阅 Polymarket RTDS BTC 价格，维护最新 `btc/usd`。
+- `BtcPriceWs`: 订阅 Polymarket RTDS BTC 价格，维护最新 `btc/usd` 和最近一分钟短历史，用于 `ret3/ret5/ret10`。
 - `OrderBook`: 保存 Up/Down 的 asks/bids。
 - `State` / `Trade`: 保存 dry-run 交易记录和结算结果。
 - `Bot::run_once`: 每轮主循环，找市场、取盘口、检查结算、调用策略。

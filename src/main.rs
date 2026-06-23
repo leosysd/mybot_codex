@@ -11,7 +11,7 @@ use polymarket_client_sdk_v2::types::{Address, Decimal as SdkDecimal, U256};
 use polymarket_client_sdk_v2::POLYGON;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -244,8 +244,7 @@ impl Config {
     }
 }
 
-const DEFAULT_BTC_ORACLE_PROFILE: &str =
-    "label=e8_strong,sec=8,bps=5,ask=0.95,spread=none,frac=1;\
+const DEFAULT_BTC_ORACLE_PROFILE: &str = "label=e8_strong,sec=8,bps=5,ask=0.95,spread=none,frac=1;\
 label=e8_normal,sec=8,bps=0.5,ask=0.93,spread=none,frac=0.75;\
 label=e5_strong,sec=5,bps=1.5,ask=0.98,spread=0.10,frac=1;\
 label=e5_cheap,sec=5,bps=0.2,ask=0.85,spread=0.10,frac=0.75;\
@@ -342,6 +341,21 @@ fn parse_btc_oracle_profile(raw: &str) -> Result<Vec<BtcOracleTier>> {
             .map(|v| v.parse())
             .transpose()?
             .unwrap_or(1.0);
+        let min_ret_3s_bps = values
+            .get("ret3")
+            .map(|v| parse_optional_f64(v))
+            .transpose()?
+            .flatten();
+        let min_ret_5s_bps = values
+            .get("ret5")
+            .map(|v| parse_optional_f64(v))
+            .transpose()?
+            .flatten();
+        let min_ret_10s_bps = values
+            .get("ret10")
+            .map(|v| parse_optional_f64(v))
+            .transpose()?
+            .flatten();
         let label = values
             .get("label")
             .cloned()
@@ -353,6 +367,9 @@ fn parse_btc_oracle_profile(raw: &str) -> Result<Vec<BtcOracleTier>> {
             max_ask,
             max_spread,
             budget_frac,
+            min_ret_3s_bps,
+            min_ret_5s_bps,
+            min_ret_10s_bps,
         });
     }
     if tiers.is_empty() {
@@ -425,10 +442,47 @@ struct BtcTick {
     received_ms: i64,
 }
 
-type BtcPriceCache = Arc<RwLock<Option<BtcTick>>>;
+#[derive(Default)]
+struct BtcPriceState {
+    latest: Option<BtcTick>,
+    history: VecDeque<BtcTick>,
+}
+
+impl BtcPriceState {
+    fn remember(&mut self, tick: BtcTick) {
+        self.latest = Some(tick.clone());
+        self.history.push_back(tick);
+        let cutoff = Utc::now().timestamp_millis() - 60_000;
+        while let Some(front) = self.history.front() {
+            if front.received_ms >= cutoff {
+                break;
+            }
+            self.history.pop_front();
+        }
+    }
+
+    fn latest(&self) -> Option<BtcTick> {
+        self.latest.clone()
+    }
+
+    fn ret_bps(&self, current: &BtcTick, seconds: i64) -> Option<f64> {
+        let cutoff = current.received_ms - seconds * 1000;
+        let past = self
+            .history
+            .iter()
+            .rev()
+            .find(|tick| tick.received_ms <= cutoff)?;
+        if past.value <= 0.0 {
+            return None;
+        }
+        Some((current.value / past.value - 1.0) * 10000.0)
+    }
+}
+
+type BtcPriceCache = Arc<RwLock<BtcPriceState>>;
 
 fn new_btc_price_cache() -> BtcPriceCache {
-    Arc::new(RwLock::new(None))
+    Arc::new(RwLock::new(BtcPriceState::default()))
 }
 
 struct BtcPriceWs {
@@ -522,13 +576,13 @@ impl BtcPriceWs {
                 );
             }
             let mut cache = self.cache.write().await;
-            if cache.is_none() {
+            if cache.latest.is_none() {
                 info!(
                     "btc price first tick {} value {:.2} ts_ms={}",
                     self.symbol, tick.value, tick.timestamp_ms
                 );
             }
-            *cache = Some(tick);
+            cache.remember(tick);
         }
     }
 
@@ -928,6 +982,9 @@ struct Trade {
     btc_start_price: Option<f64>,
     btc_entry_price: Option<f64>,
     btc_from_start_bps: Option<f64>,
+    btc_ret_3s_bps: Option<f64>,
+    btc_ret_5s_bps: Option<f64>,
+    btc_ret_10s_bps: Option<f64>,
     winner: Option<String>,
     pnl: Option<f64>,
 }
@@ -972,6 +1029,9 @@ struct BtcOracleTier {
     max_ask: f64,
     max_spread: Option<f64>,
     budget_frac: f64,
+    min_ret_3s_bps: Option<f64>,
+    min_ret_5s_bps: Option<f64>,
+    min_ret_10s_bps: Option<f64>,
 }
 
 struct TopQuote {
@@ -1123,21 +1183,11 @@ impl Bot {
         }
 
         if self.cfg.strategy == "btc_oracle_fallback" {
-            self.decide_btc_oracle_fallback(
-                &market,
-                &up_quote,
-                &dn_quote,
-                seconds_left,
-            )
-            .await
+            self.decide_btc_oracle_fallback(&market, &up_quote, &dn_quote, seconds_left)
+                .await
         } else if self.cfg.strategy == "btc_distance_ladder" {
-            self.decide_btc_distance_ladder(
-                &market,
-                &up_quote,
-                &dn_quote,
-                seconds_left,
-            )
-            .await
+            self.decide_btc_distance_ladder(&market, &up_quote, &dn_quote, seconds_left)
+                .await
         } else if self.cfg.strategy == "btc_distance_tail" {
             let (Some(up_ask), Some(dn_ask)) = (up_quote.ask, dn_quote.ask) else {
                 return Ok(());
@@ -1238,18 +1288,18 @@ impl Bot {
     }
 
     async fn latest_btc_tick(&self) -> Option<BtcTick> {
-        self.btc_price.read().await.clone()
+        self.btc_price.read().await.latest()
+    }
+
+    async fn btc_ret_bps(&self, current: &BtcTick, seconds: i64) -> Option<f64> {
+        self.btc_price.read().await.ret_bps(current, seconds)
     }
 
     fn btc_tick_age_ms(tick: &BtcTick) -> i64 {
         Utc::now().timestamp_millis() - tick.received_ms
     }
 
-    async fn maybe_capture_btc_start(
-        &mut self,
-        market: &Market,
-        seconds_left: i64,
-    ) -> Result<()> {
+    async fn maybe_capture_btc_start(&mut self, market: &Market, seconds_left: i64) -> Result<()> {
         if self.btc_start.contains_key(&market.slug) {
             return Ok(());
         }
@@ -1500,6 +1550,9 @@ impl Bot {
                 .await;
         }
         let abs_bps = bps.abs();
+        let btc_ret_3s_bps = self.btc_ret_bps(&tick, 3).await;
+        let btc_ret_5s_bps = self.btc_ret_bps(&tick, 5).await;
+        let btc_ret_10s_bps = self.btc_ret_bps(&tick, 10).await;
         let (side, quote) = if bps > 0.0 {
             ("Up", up_quote)
         } else {
@@ -1508,7 +1561,7 @@ impl Bot {
 
         let mut selected: Option<(BtcOracleTier, f64, f64, f64, f64)> = None;
         let mut reject_reasons: Vec<serde_json::Value> = Vec::new();
-        for tier in tiers {
+        'tier_loop: for tier in tiers {
             if abs_bps < tier.min_abs_bps {
                 reject_reasons.push(json!({
                     "tier": tier.label,
@@ -1517,6 +1570,38 @@ impl Bot {
                     "min_abs_bps": tier.min_abs_bps,
                 }));
                 continue;
+            }
+            for (ret_name, ret_value, min_ret) in [
+                ("ret3", btc_ret_3s_bps, tier.min_ret_3s_bps),
+                ("ret5", btc_ret_5s_bps, tier.min_ret_5s_bps),
+                ("ret10", btc_ret_10s_bps, tier.min_ret_10s_bps),
+            ] {
+                let Some(min_ret) = min_ret else {
+                    continue;
+                };
+                let Some(ret_value) = ret_value else {
+                    reject_reasons.push(json!({
+                        "tier": tier.label,
+                        "reason": "btc_ret_missing",
+                        "ret": ret_name,
+                        "side": side,
+                        "min_ret_bps": min_ret,
+                    }));
+                    continue 'tier_loop;
+                };
+                let signed_ret = if side == "Up" { ret_value } else { -ret_value };
+                if signed_ret < min_ret {
+                    reject_reasons.push(json!({
+                        "tier": tier.label,
+                        "reason": "btc_ret_too_weak",
+                        "ret": ret_name,
+                        "side": side,
+                        "ret_bps": ret_value,
+                        "signed_ret_bps": signed_ret,
+                        "min_ret_bps": min_ret,
+                    }));
+                    continue 'tier_loop;
+                }
             }
             let Some(ask) = quote.ask else {
                 reject_reasons.push(json!({
@@ -1590,6 +1675,9 @@ impl Bot {
                     "btc_start_price": start_price,
                     "btc_entry_price": tick.value,
                     "btc_from_start_bps": bps,
+                    "btc_ret_3s_bps": btc_ret_3s_bps,
+                    "btc_ret_5s_bps": btc_ret_5s_bps,
+                    "btc_ret_10s_bps": btc_ret_10s_bps,
                     "quote_source": quote.source,
                     "rejects": reject_reasons,
                     "ts": Utc::now().timestamp(),
@@ -1635,6 +1723,9 @@ impl Bot {
                         "budget": budget,
                         "planned_shares": planned,
                         "planned_cost": planned_cost,
+                        "btc_ret_3s_bps": btc_ret_3s_bps,
+                        "btc_ret_5s_bps": btc_ret_5s_bps,
+                        "btc_ret_10s_bps": btc_ret_10s_bps,
                     }),
                 )
                 .await;
@@ -1659,6 +1750,9 @@ impl Bot {
             "btc_start_price": start_price,
             "btc_entry_price": tick.value,
             "btc_from_start_bps": bps,
+            "btc_ret_3s_bps": btc_ret_3s_bps,
+            "btc_ret_5s_bps": btc_ret_5s_bps,
+            "btc_ret_10s_bps": btc_ret_10s_bps,
             "btc_price_age_ms": btc_age_ms,
             "seconds_left": seconds_left,
             "quote_source": quote.source,
@@ -1670,7 +1764,10 @@ impl Bot {
         let token = market
             .token_for(side)
             .ok_or_else(|| anyhow!("missing token for side {side}"))?;
-        let fill = self.executor.buy_fak(token, ask, planned, Some(ask)).await?;
+        let fill = self
+            .executor
+            .buy_fak(token, ask, planned, Some(ask))
+            .await?;
         self.signal(json!({
             "phase": "submit",
             "label": "btc_oracle_fallback_entry",
@@ -1709,6 +1806,9 @@ impl Bot {
             btc_start_price: Some(start_price),
             btc_entry_price: Some(tick.value),
             btc_from_start_bps: Some(bps),
+            btc_ret_3s_bps,
+            btc_ret_5s_bps,
+            btc_ret_10s_bps,
             winner: None,
             pnl: None,
         });
@@ -1725,6 +1825,9 @@ impl Bot {
             "btc_start_price": start_price,
             "btc_entry_price": tick.value,
             "btc_from_start_bps": bps,
+            "btc_ret_3s_bps": btc_ret_3s_bps,
+            "btc_ret_5s_bps": btc_ret_5s_bps,
+            "btc_ret_10s_bps": btc_ret_10s_bps,
             "dry_run": self.cfg.dry_run,
             "ts": Utc::now().timestamp(),
         }))
@@ -2022,7 +2125,10 @@ impl Bot {
         let token = market
             .token_for(side)
             .ok_or_else(|| anyhow!("missing token for side {side}"))?;
-        let fill = self.executor.buy_fak(token, ask, planned, Some(ask)).await?;
+        let fill = self
+            .executor
+            .buy_fak(token, ask, planned, Some(ask))
+            .await?;
         self.signal(json!({
             "phase": "submit",
             "label": "btc_distance_ladder_entry",
@@ -2061,6 +2167,9 @@ impl Bot {
             btc_start_price: Some(start_price),
             btc_entry_price: Some(tick.value),
             btc_from_start_bps: Some(bps),
+            btc_ret_3s_bps: None,
+            btc_ret_5s_bps: None,
+            btc_ret_10s_bps: None,
             winner: None,
             pnl: None,
         });
@@ -2092,7 +2201,15 @@ impl Bot {
         .await?;
         info!(
             "BTC ladder {} entry {} {} @ {:.3} x {:.0} cost {:.2} bps={:.4} score={:.4} dry_run={}",
-            tier.label, market.slug, side, filled_price, filled_shares, filled_cost, bps, score, self.cfg.dry_run
+            tier.label,
+            market.slug,
+            side,
+            filled_price,
+            filled_shares,
+            filled_cost,
+            bps,
+            score,
+            self.cfg.dry_run
         );
         Ok(())
     }
@@ -2306,7 +2423,10 @@ impl Bot {
         let token = market
             .token_for(side)
             .ok_or_else(|| anyhow!("missing token for side {side}"))?;
-        let fill = self.executor.buy_fak(token, ask, planned, Some(ask)).await?;
+        let fill = self
+            .executor
+            .buy_fak(token, ask, planned, Some(ask))
+            .await?;
         self.signal(json!({
             "phase": "submit",
             "label": "btc_distance_tail_entry",
@@ -2344,6 +2464,9 @@ impl Bot {
             btc_start_price: Some(start_price),
             btc_entry_price: Some(tick.value),
             btc_from_start_bps: Some(bps),
+            btc_ret_3s_bps: None,
+            btc_ret_5s_bps: None,
+            btc_ret_10s_bps: None,
             winner: None,
             pnl: None,
         });
@@ -2660,6 +2783,9 @@ impl Bot {
             btc_start_price: None,
             btc_entry_price: None,
             btc_from_start_bps: None,
+            btc_ret_3s_bps: None,
+            btc_ret_5s_bps: None,
+            btc_ret_10s_bps: None,
             winner: None,
             pnl: None,
         });
@@ -2948,5 +3074,25 @@ fn map_sig_type(t: u8) -> SignatureType {
         1 => SignatureType::Proxy,
         2 => SignatureType::GnosisSafe,
         _ => SignatureType::Poly1271,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_btc_oracle_recent_momentum_filters() {
+        let tiers = parse_btc_oracle_profile(
+            "label=t15_momo,sec=15,bps=5,ask=0.98,spread=0.10,frac=1,ret3=0,ret5=0.5,ret10=none",
+        )
+        .expect("profile should parse");
+        assert_eq!(tiers.len(), 1);
+        let tier = &tiers[0];
+        assert_eq!(tier.label, "t15_momo");
+        assert_eq!(tier.entry_sec, 15);
+        assert_eq!(tier.min_ret_3s_bps, Some(0.0));
+        assert_eq!(tier.min_ret_5s_bps, Some(0.5));
+        assert_eq!(tier.min_ret_10s_bps, None);
     }
 }

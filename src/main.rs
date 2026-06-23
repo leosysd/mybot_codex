@@ -146,6 +146,9 @@ struct Config {
 impl Config {
     fn from_env() -> Result<Self> {
         let data_dir = PathBuf::from(env("DATA_DIR", "data"));
+        let btc_price_symbol = env("BTC_PRICE_SYMBOL", "btc/usd");
+        let btc_price_filters =
+            normalize_btc_filters(&env("BTC_PRICE_FILTERS", ""), &btc_price_symbol);
         Ok(Self {
             dry_run: env_bool("DRY_RUN", true),
             strategy: env("STRATEGY", "btc_distance_ladder"),
@@ -163,8 +166,8 @@ impl Config {
             btc_price_ws_url: env("BTC_PRICE_WS_URL", "wss://ws-live-data.polymarket.com"),
             btc_price_topic: env("BTC_PRICE_TOPIC", "crypto_prices_chainlink"),
             btc_price_type: env("BTC_PRICE_TYPE", "*"),
-            btc_price_filters: env("BTC_PRICE_FILTERS", r#"{"symbol":"btc/usd"}"#),
-            btc_price_symbol: env("BTC_PRICE_SYMBOL", "btc/usd"),
+            btc_price_filters,
+            btc_price_symbol,
             btc_price_max_age_ms: env_i64("BTC_PRICE_MAX_AGE_MS", 3000),
             signal_file: PathBuf::from(env("SIGNAL_FILE", "data/t1_late_signals.jsonl")),
             state_file: PathBuf::from(env("STATE_FILE", "data/t1_late_state.json")),
@@ -251,6 +254,14 @@ fn env_f64(key: &str, default: f64) -> f64 {
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(default)
+}
+
+fn normalize_btc_filters(raw: &str, symbol: &str) -> String {
+    let trimmed = raw.trim();
+    if !trimmed.is_empty() && serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return trimmed.to_string();
+    }
+    json!({ "symbol": symbol }).to_string()
 }
 
 #[derive(Debug, Clone)]

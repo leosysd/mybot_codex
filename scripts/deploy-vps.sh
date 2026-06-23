@@ -68,6 +68,7 @@ set_env() {
 
 set_env DRY_RUN 1
 set_env STRATEGY btc_distance_ladder
+set_env BTC_PRICE_FILTERS "'{\"symbol\":\"btc/usd\"}'"
 set_env T1_LATE_TARGET_QTY 5000
 set_env T1_LATE_START_EQUITY 300
 set_env T1_LATE_RISK_FRACTION 0.2

@@ -246,11 +246,11 @@ impl Config {
 
 const DEFAULT_BTC_ORACLE_PROFILE: &str =
     "label=t15_momo,sec=15,bps=5,ask=0.98,spread=0.10,frac=1,ret3=0,ret5=0.5;\
-label=e8_strong,sec=8,bps=5,ask=0.95,spread=none,frac=1;\
-label=e8_normal,sec=8,bps=0.5,ask=0.93,spread=none,frac=0.75;\
-label=e5_strong,sec=5,bps=1.5,ask=0.98,spread=0.10,frac=1;\
-label=e5_cheap,sec=5,bps=0.2,ask=0.85,spread=0.10,frac=0.75;\
-label=e3_final,sec=3,bps=0,ask=0.95,spread=none,frac=1";
+label=e8_strong,sec=8,bps=5,ask=0.95,minask=0.5,spread=none,frac=1;\
+label=e8_normal,sec=8,bps=0.5,ask=0.93,minask=0.5,spread=none,frac=0.75;\
+label=e5_strong,sec=5,bps=1.5,ask=0.98,minask=0.5,spread=0.10,frac=1;\
+label=e5_cheap,sec=5,bps=0.2,ask=0.85,minask=0.5,spread=0.10,frac=0.75;\
+label=e3_final,sec=3,bps=0,ask=0.95,minask=0.5,spread=none,frac=1";
 
 fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -333,6 +333,12 @@ fn parse_btc_oracle_profile(raw: &str) -> Result<Vec<BtcOracleTier>> {
             .get("ask")
             .ok_or_else(|| anyhow!("BTC_ORACLE_PROFILE tier {idx} missing ask"))?
             .parse()?;
+        let min_ask = values
+            .get("minask")
+            .or_else(|| values.get("min_ask"))
+            .map(|v| v.parse())
+            .transpose()?
+            .unwrap_or(0.0);
         let max_spread = values
             .get("spread")
             .map(|v| parse_optional_f64(v))
@@ -367,6 +373,7 @@ fn parse_btc_oracle_profile(raw: &str) -> Result<Vec<BtcOracleTier>> {
             entry_sec: sec,
             min_abs_bps,
             max_ask,
+            min_ask,
             max_spread,
             budget_frac,
             min_ret_3s_bps,
@@ -1029,6 +1036,7 @@ struct BtcOracleTier {
     entry_sec: i64,
     min_abs_bps: f64,
     max_ask: f64,
+    min_ask: f64,
     max_spread: Option<f64>,
     budget_frac: f64,
     min_ret_3s_bps: Option<f64>,
@@ -1641,6 +1649,16 @@ impl Bot {
                     "side": side,
                     "ask": ask,
                     "max_ask": tier.max_ask,
+                }));
+                continue;
+            }
+            if ask < tier.min_ask {
+                reject_reasons.push(json!({
+                    "tier": tier.label,
+                    "reason": "ask_too_low",
+                    "side": side,
+                    "ask": ask,
+                    "min_ask": tier.min_ask,
                 }));
                 continue;
             }
@@ -3093,8 +3111,19 @@ mod tests {
         let tier = &tiers[0];
         assert_eq!(tier.label, "t15_momo");
         assert_eq!(tier.entry_sec, 15);
+        assert_eq!(tier.min_ask, 0.0);
         assert_eq!(tier.min_ret_3s_bps, Some(0.0));
         assert_eq!(tier.min_ret_5s_bps, Some(0.5));
         assert_eq!(tier.min_ret_10s_bps, None);
+    }
+
+    #[test]
+    fn parses_btc_oracle_min_ask_filter() {
+        let tiers = parse_btc_oracle_profile(
+            "label=e8_strong,sec=8,bps=5,ask=0.95,minask=0.5,spread=none,frac=1",
+        )
+        .expect("profile should parse");
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].min_ask, 0.5);
     }
 }

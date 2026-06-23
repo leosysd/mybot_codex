@@ -8,31 +8,31 @@
 
 ### btc_oracle_fallback
 
-当前默认策略是 Candidate C：在 Candidate B 的 BTC 涨跌幅和 ask 盈亏比分层 fallback 前，增加一层 T-15 短动量提前入口。
+当前默认策略是 Candidate C + late minask：在 Candidate B 的 BTC 涨跌幅和 ask 盈亏比分层 fallback 前，增加一层 T-15 短动量提前入口，并要求后段 T-8/T-5/T-3 的选中方向 ask 至少 0.5。
 
 1. 通过 Polymarket RTDS 订阅 `btc/usd` 实时价格。
 2. 新盘口开始时记录 BTC 开盘附近价格，作为本盘基准价。
 3. 当前 BTC 高于基准价只考虑 Up，低于或等于基准价只考虑 Down。
 4. T-15 短动量入口：BTC 偏离 `>=5 bps`，最近 3 秒同向，最近 5 秒同向 `>=0.5 bps`，ask `<=0.98`，spread `<=0.10`。
-5. T-8 强信号：BTC 偏离 `>=5 bps`，ask `<=0.95`，可用 100% 当盘预算。
-6. T-8 普通信号：BTC 偏离 `>=0.5 bps`，ask `<=0.93`，可用 75% 当盘预算。
-7. T-5 强 fallback：BTC 偏离 `>=1.5 bps`，ask `<=0.98`，spread `<=0.10`，可用 100% 当盘预算。
-8. T-5 低价 fallback：BTC 偏离 `>=0.2 bps`，ask `<=0.85`，spread `<=0.10`，可用 75% 当盘预算。
-9. T-3 最后 fallback：ask `<=0.95`，可用 100% 当盘预算；不吃 0.97~0.99 高价尾盘。
+5. T-8 强信号：BTC 偏离 `>=5 bps`，`0.5 <= ask <= 0.95`，可用 100% 当盘预算。
+6. T-8 普通信号：BTC 偏离 `>=0.5 bps`，`0.5 <= ask <= 0.93`，可用 75% 当盘预算。
+7. T-5 强 fallback：BTC 偏离 `>=1.5 bps`，`0.5 <= ask <= 0.98`，spread `<=0.10`，可用 100% 当盘预算。
+8. T-5 低价 fallback：BTC 偏离 `>=0.2 bps`，`0.5 <= ask <= 0.85`，spread `<=0.10`，可用 75% 当盘预算。
+9. T-3 最后 fallback：`0.5 <= ask <= 0.95`，可用 100% 当盘预算；不吃 0.97~0.99 高价尾盘，也不买盘口明显不认可的一边。
 10. 同一盘口最多下一笔 FAK，默认 `DRY_RUN=1` 只模拟。
 
-当前 Candidate C 回测口径:
+当前 Candidate C + late minask 回测口径:
 
 ```text
-300u -> 10616.54u
-平均每天 +332.79u
-最差日 -259.56u
-最大回撤 866.25u
+300u -> 12048.79u
+平均每天 +378.99u
+最差日 -38.32u
+最大回撤 778.74u
 最大单笔成本 269.97u
-2171 笔，错 420 笔
+1938 笔，错 214 笔
 ```
 
-这个结果来自 `telonex-qty295-single-month/scripts/roll_btc_oracle_fallback.py` 和 `roll_btc_oracle_profile_walkforward.py`，使用一个月 live-state 盘口和 Telonex BTC 价格特征。它达到了历史 taker 回测目标，但仍只能先跑 VPS dry-run；重点验证 T-15/T-8/T-5/T-3 的真实 FAK 成交率、盘口延迟和 ask 消失率。
+这个结果来自 `telonex-qty295-single-month/scripts/roll_btc_oracle_fallback.py` 和 `reports/btc_oracle_minask_fix_holdout_summary_20260623.csv`，使用一个月 live-state 盘口和 Telonex BTC 价格特征。它达到了历史 taker 回测目标，但仍只能先跑 VPS dry-run；重点验证 T-15/T-8/T-5/T-3 的真实 FAK 成交率、盘口延迟和 ask 消失率。
 
 ### btc_distance_ladder
 
@@ -342,7 +342,7 @@ dry-run 资金模型。
 - `T1_LATE_MAX_DEPLOY_USDC=0`: 不设置固定单盘口上限。
 
 ```text
-BTC_ORACLE_PROFILE=label=t15_momo,sec=15,bps=5,ask=0.98,spread=0.10,frac=1,ret3=0,ret5=0.5;...
+BTC_ORACLE_PROFILE=label=t15_momo,sec=15,bps=5,ask=0.98,spread=0.10,frac=1,ret3=0,ret5=0.5;label=e8_strong,sec=8,bps=5,ask=0.95,minask=0.5,...
 BTC_ORACLE_RISK_FRACTION=0.25
 BTC_ORACLE_MAX_DEPLOY_USDC=270
 BTC_ORACLE_DAILY_TAKE_PROFIT=800
@@ -355,6 +355,7 @@ Candidate C 参数。
 - `sec`: 精确剩余秒数，只在这个秒点检查。
 - `bps`: BTC 相对本盘基准价的最小绝对偏离，单位 bps。
 - `ask`: 选中方向最高可吃 ask。
+- `minask`: 选中方向最低 ask；后段默认 `0.5`，避免买盘口明显不认可的一边。
 - `spread`: 选中方向最大 ask-bid spread；`none` 表示不检查。
 - `frac`: 这一档最多使用当盘预算的比例。
 - `ret3` / `ret5` / `ret10`: 可选短动量过滤。以选中方向为准，例如买 Up 时 `ret5=0.5` 表示最近 5 秒 BTC 至少上涨 0.5bp；买 Down 时表示最近 5 秒 BTC 至少下跌 0.5bp。不填写则不检查。
@@ -362,10 +363,10 @@ Candidate C 参数。
 - `BTC_ORACLE_MAX_DEPLOY_USDC=270`: 每个盘口硬上限 270u。
 - `BTC_ORACLE_DAILY_TAKE_PROFIT=800`: 当天已结算 dry-run PnL 到 800u 后停止当天新开仓。
 
-Candidate C 默认 profile，在 Candidate B 前增加 T-15 短动量提前层：
+Candidate C + late minask 默认 profile，在 Candidate B 前增加 T-15 短动量提前层，并要求 T-8/T-5/T-3 的选中方向 ask 至少 0.5：
 
 ```text
-BTC_ORACLE_PROFILE=label=t15_momo,sec=15,bps=5,ask=0.98,spread=0.10,frac=1,ret3=0,ret5=0.5;label=e8_strong,sec=8,bps=5,ask=0.95,spread=none,frac=1;label=e8_normal,sec=8,bps=0.5,ask=0.93,spread=none,frac=0.75;label=e5_strong,sec=5,bps=1.5,ask=0.98,spread=0.10,frac=1;label=e5_cheap,sec=5,bps=0.2,ask=0.85,spread=0.10,frac=0.75;label=e3_final,sec=3,bps=0,ask=0.95,spread=none,frac=1
+BTC_ORACLE_PROFILE=label=t15_momo,sec=15,bps=5,ask=0.98,spread=0.10,frac=1,ret3=0,ret5=0.5;label=e8_strong,sec=8,bps=5,ask=0.95,minask=0.5,spread=none,frac=1;label=e8_normal,sec=8,bps=0.5,ask=0.93,minask=0.5,spread=none,frac=0.75;label=e5_strong,sec=5,bps=1.5,ask=0.98,minask=0.5,spread=0.10,frac=1;label=e5_cheap,sec=5,bps=0.2,ask=0.85,minask=0.5,spread=0.10,frac=0.75;label=e3_final,sec=3,bps=0,ask=0.95,minask=0.5,spread=none,frac=1
 ```
 
 ```text
@@ -577,4 +578,4 @@ jydiag --hours 0 --all-starts
 5. 明确接受 `BTC_ORACLE_RISK_FRACTION=0.25` 和 `BTC_ORACLE_MAX_DEPLOY_USDC=270` 的风险边界。
 6. 统计 T-15/T-8/T-5/T-3 的 FAK 成交率、无 ask 率、REST fallback 次数和 RTDS BTC 延迟。
 
-历史回测不是未来收益保证。当前默认 Candidate C 回测仍然存在约 -270u 的单盘口亏损和约 866.25u 的最大回撤，必须先 dry-run 验证 T-15/T-8/T-5/T-3 真实可成交性、RTDS 延迟和时间戳对齐。
+历史回测不是未来收益保证。当前默认 Candidate C + late minask 回测仍然存在约 -270u 的单盘口亏损和约 778.74u 的最大回撤，必须先 dry-run 验证 T-15/T-8/T-5/T-3 真实可成交性、RTDS 延迟和时间戳对齐。

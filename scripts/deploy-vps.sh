@@ -75,7 +75,7 @@ set_env T1_LATE_TARGET_QTY 5000
 set_env T1_LATE_START_EQUITY 300
 set_env T1_LATE_RISK_FRACTION 0.2
 set_env T1_LATE_MAX_DEPLOY_USDC 255
-set_env BTC_ORACLE_PROFILE "label=t15_momo,sec=15,bps=5,ask=0.98,spread=0.10,frac=1,ret3=0,ret5=0.5;label=e8_strong,sec=8,bps=5,ask=0.95,spread=none,frac=1;label=e8_normal,sec=8,bps=0.5,ask=0.93,spread=none,frac=0.75;label=e5_strong,sec=5,bps=1.5,ask=0.98,spread=0.10,frac=1;label=e5_cheap,sec=5,bps=0.2,ask=0.85,spread=0.10,frac=0.75;label=e3_final,sec=3,bps=0,ask=0.95,spread=none,frac=1"
+set_env BTC_ORACLE_PROFILE "label=t15_momo,sec=15,bps=5,ask=0.98,spread=0.10,frac=1,ret3=0,ret5=0.5;label=e8_strong,sec=8,bps=5,ask=0.95,minask=0.5,spread=none,frac=1;label=e8_normal,sec=8,bps=0.5,ask=0.93,minask=0.5,spread=none,frac=0.75;label=e5_strong,sec=5,bps=1.5,ask=0.98,minask=0.5,spread=0.10,frac=1;label=e5_cheap,sec=5,bps=0.2,ask=0.85,minask=0.5,spread=0.10,frac=0.75;label=e3_final,sec=3,bps=0,ask=0.95,minask=0.5,spread=none,frac=1"
 set_env BTC_ORACLE_RISK_FRACTION 0.25
 set_env BTC_ORACLE_MAX_DEPLOY_USDC 270
 set_env BTC_ORACLE_DAILY_TAKE_PROFIT 800

@@ -950,9 +950,26 @@ impl Bot {
 
         let up_quote = self.top_quote(up_token, tail_window).await;
         let dn_quote = self.top_quote(dn_token, tail_window).await;
-        let (Some(up_ask), Some(dn_ask)) = (up_quote.ask, dn_quote.ask) else {
-            if tail_window && now > self.last_tail_log_ts {
-                self.last_tail_log_ts = now;
+
+        if tail_window && now > self.last_tail_log_ts {
+            self.last_tail_log_ts = now;
+            if let (Some(up_ask), Some(dn_ask)) = (up_quote.ask, dn_quote.ask) {
+                self.signal(json!({
+                    "phase": "t1_late_tail",
+                    "market": market.slug,
+                    "seconds_left": seconds_left,
+                    "up_ask": up_ask,
+                    "dn_ask": dn_ask,
+                    "up_bid": up_quote.bid,
+                    "dn_bid": dn_quote.bid,
+                    "up_size": up_quote.ask_size,
+                    "dn_size": dn_quote.ask_size,
+                    "up_source": up_quote.source,
+                    "dn_source": dn_quote.source,
+                    "ts": now,
+                }))
+                .await?;
+            } else {
                 self.signal(json!({
                     "phase": "t1_late_book_missing",
                     "market": market.slug,
@@ -965,41 +982,20 @@ impl Bot {
                 }))
                 .await?;
             }
-            return Ok(());
-        };
-
-        if tail_window && now > self.last_tail_log_ts {
-            self.last_tail_log_ts = now;
-            self.signal(json!({
-                "phase": "t1_late_tail",
-                "market": market.slug,
-                "seconds_left": seconds_left,
-                "up_ask": up_ask,
-                "dn_ask": dn_ask,
-                "up_bid": up_quote.bid,
-                "dn_bid": dn_quote.bid,
-                "up_size": up_quote.ask_size,
-                "dn_size": dn_quote.ask_size,
-                "up_source": up_quote.source,
-                "dn_source": dn_quote.source,
-                "ts": now,
-            }))
-            .await?;
         }
 
         if self.cfg.strategy == "btc_distance_ladder" {
             self.decide_btc_distance_ladder(
                 &market,
-                up_ask,
-                up_quote.bid,
-                up_quote.ask_size.unwrap_or(0.0),
-                dn_ask,
-                dn_quote.bid,
-                dn_quote.ask_size.unwrap_or(0.0),
+                &up_quote,
+                &dn_quote,
                 seconds_left,
             )
             .await
         } else if self.cfg.strategy == "btc_distance_tail" {
+            let (Some(up_ask), Some(dn_ask)) = (up_quote.ask, dn_quote.ask) else {
+                return Ok(());
+            };
             self.decide_btc_distance_tail(
                 &market,
                 up_ask,
@@ -1012,6 +1008,9 @@ impl Bot {
             )
             .await
         } else {
+            let (Some(up_ask), Some(dn_ask)) = (up_quote.ask, dn_quote.ask) else {
+                return Ok(());
+            };
             self.decide_t1_late(
                 &market,
                 up_ask,
@@ -1247,12 +1246,8 @@ impl Bot {
     async fn decide_btc_distance_ladder(
         &mut self,
         market: &Market,
-        up_ask: f64,
-        up_bid: Option<f64>,
-        up_size: f64,
-        dn_ask: f64,
-        dn_bid: Option<f64>,
-        dn_size: f64,
+        up_quote: &TopQuote,
+        dn_quote: &TopQuote,
         seconds_left: i64,
     ) -> Result<()> {
         self.maybe_capture_btc_start(market, seconds_left).await?;
@@ -1338,28 +1333,49 @@ impl Bot {
             return Ok(());
         }
 
-        let (side, ask, bid, ask_size) = if bps > 0.0 {
-            ("Up", up_ask, up_bid, up_size)
+        let (side, quote) = if bps > 0.0 {
+            ("Up", up_quote)
         } else {
-            ("Down", dn_ask, dn_bid, dn_size)
+            ("Down", dn_quote)
         };
-        let Some(bid) = bid else {
-            if seconds_left <= self.cfg.btc_ladder_tail_secs {
-                return self
-                    .btc_distance_block(
-                        market,
-                        "bid_missing",
-                        seconds_left,
-                        json!({
-                            "side": side,
-                            "ask": ask,
-                            "btc_from_start_bps": bps,
-                        }),
-                    )
-                    .await;
+        let Some(ask) = quote.ask else {
+            if seconds_left <= self.cfg.btc_ladder_mid_secs
+                && self.btc_ladder_skip_logged.insert(market.slug.clone())
+            {
+                self.btc_distance_block(
+                    market,
+                    "selected_ask_missing",
+                    seconds_left,
+                    json!({
+                        "side": side,
+                        "quote_source": quote.source,
+                        "btc_from_start_bps": bps,
+                    }),
+                )
+                .await?;
             }
             return Ok(());
         };
+        let Some(bid) = quote.bid else {
+            if seconds_left <= self.cfg.btc_ladder_mid_secs
+                && self.btc_ladder_skip_logged.insert(market.slug.clone())
+            {
+                self.btc_distance_block(
+                    market,
+                    "selected_bid_missing",
+                    seconds_left,
+                    json!({
+                        "side": side,
+                        "ask": ask,
+                        "quote_source": quote.source,
+                        "btc_from_start_bps": bps,
+                    }),
+                )
+                .await?;
+            }
+            return Ok(());
+        };
+        let ask_size = quote.ask_size.unwrap_or(0.0);
         let spread = ask - bid;
         let abs_bps = bps.abs();
         let score = Self::btc_ladder_score(abs_bps, seconds_left);

@@ -2,20 +2,72 @@
 
 `mybot-codex` 是一个独立的 Polymarket BTC 5 分钟 taker dry-run 机器人。
 
-它只跑一条策略: `t1_late`。它不包含老机器人的 accum、maker 做市、zscore、sniper、训练模型等逻辑，也不会读 `/opt/jy-data`。VPS 上的老机器人 `jy-bot.service` 和新机器人 `mybot-codex.service` 是两个服务。
+它默认跑一条策略: `btc_distance_ladder`。旧的 `btc_distance_tail` 和 `t1_late` 仍保留，可通过配置切换。它不包含老机器人的 accum、maker 做市、zscore、sniper、训练模型等逻辑，也不会读 `/opt/jy-data`。VPS 上的老机器人 `jy-bot.service` 和新机器人 `mybot-codex.service` 是两个服务。
 
 ## 策略口径
 
-当前策略是一个尾盘确认 taker 策略:
+### btc_distance_ladder
+
+当前默认策略是 BTC 距离分层 taker 策略:
+
+1. 通过 Polymarket RTDS 订阅 `btc/usd` 实时价格。
+2. 新盘口开始时记录 BTC 开盘附近价格，作为本盘基准价。
+3. 当前 BTC 价格高于本盘基准价就只考虑 Up，低于基准价就只考虑 Down。
+4. T-60 开始允许 early 层，但要求 BTC 距离极端，只能补到单盘口风险上限的 5%。
+5. T-5 开始允许 mid 层，要求 BTC 距离和强度仍达标，最多补到单盘口风险上限的 40%。
+6. T-2/T-1 允许 tail 层，最多补到单盘口风险上限的 100%。
+7. 同一盘口不追着换边；如果已持有一边，BTC 方向反转时不再加仓。
+8. 同一时刻只补到当前最高允许层，不会把 early/mid/tail 在同一顶档重复吃三次。
+9. 所有下单都是 FAK，默认 `DRY_RUN=1` 只模拟。
+
+当前一个月回测最佳口径:
+
+```text
+300u -> 20133.67u
+平均每天 +639.80u
+最差日 -282.09u
+最大回撤 1107.88u
+2834 盘，错 193 盘
+```
+
+这个结果来自 `telonex-qty295-single-month/scripts/roll_btc_distance_ladder_taker.py`，使用一个月 live-state 盘口和 Telonex BTC 价格特征。
+
+### btc_distance_tail
+
+旧的尾盘策略是 BTC 距离尾盘 taker 策略:
+
+1. 通过 Polymarket RTDS 订阅 `btc/usd` 实时价格。
+2. 新盘口开始时记录 BTC 开盘附近价格，作为本盘基准价。
+3. T-2 秒开始检查；如果 T-2 不合格，T-1 再兜底检查一次。
+4. 当前 BTC 价格高于本盘基准价就买 Up，低于基准价就买 Down。
+5. BTC 距离不能等于 0，且必须满足 `BTC_DISTANCE_MIN_ABS_BPS`。
+6. 选中方向 ask 必须 `<= BTC_DISTANCE_MAX_ASK`，默认 `0.99`。
+7. 选中方向 spread 必须 `<= BTC_DISTANCE_MAX_SPREAD`，默认 `0.10`。
+8. 跳过 `BTC_DISTANCE_EXCLUDE_ASK_LOW <= ask < BTC_DISTANCE_EXCLUDE_ASK_HIGH`，默认跳过 `0.85~0.90`。
+9. 满足条件后买选中方向，订单类型是 FAK。
+
+当前一个月回测最佳口径:
+
+```text
+300u -> 12094.76u
+平均每天 +380.48u
+最差日 -216.26u
+最大回撤 740.93u
+1881 盘，错 125 盘
+```
+
+### t1_late
+
+旧策略是尾盘盘口确认 taker 策略:
 
 1. T-10 秒读取 Up/Down 顶档 ask。
 2. T-8 秒再次读取 Up/Down 顶档 ask。
 3. T-10 和 T-8 的强势边必须相同。
-4. T-10 和 T-8 的强势边 ask 必须 `>= T1_LATE_CONFIRM_MIN_ASK`，默认 `0.98`。
+4. T-10 和 T-8 的强势边 ask 必须 `>= T1_LATE_CONFIRM_MIN_ASK`。
 5. T-1 秒再次读取盘口。
 6. T-1 强势边必须仍然是同一边。
-7. T-1 强势边 ask 必须 `>= T1_LATE_ENTRY_MIN_ASK`，默认 `0.75`。
-8. T-1 弱势边 ask 必须 `<= T1_LATE_OPP_MAX_ASK`，默认 `0.30`。
+7. T-1 强势边 ask 必须 `>= T1_LATE_ENTRY_MIN_ASK`。
+8. T-1 弱势边 ask 必须 `<= T1_LATE_OPP_MAX_ASK`。
 9. 满足条件后买强势边，订单类型是 FAK。
 
 手续费模型:
@@ -170,6 +222,12 @@ DRY_RUN=1
 `1` 表示只模拟，不真实下单。`0` 表示允许真实 FAK 下单。没有连续 dry-run 验证前不要改成 `0`。
 
 ```text
+STRATEGY=btc_distance_ladder
+```
+
+策略选择。默认 `btc_distance_ladder`；如需旧尾盘逻辑可改为 `btc_distance_tail`，如需盘口确认旧逻辑可改为 `t1_late`。
+
+```text
 PRIVATE_KEY=
 DEPOSIT_WALLET_ADDRESS=
 SIGNATURE_TYPE=3
@@ -182,6 +240,17 @@ MARKET_SLUG_PREFIX=btc-updown-5m
 ```
 
 交易市场前缀。当前只针对 BTC Up/Down 5m。
+
+```text
+BTC_PRICE_WS_URL=wss://ws-live-data.polymarket.com
+BTC_PRICE_TOPIC=crypto_prices_chainlink
+BTC_PRICE_TYPE=*
+BTC_PRICE_FILTERS={"symbol":"btc/usd"}
+BTC_PRICE_SYMBOL=btc/usd
+BTC_PRICE_MAX_AGE_MS=3000
+```
+
+BTC 实时价格源。用于计算当前 BTC 价格相对本盘开盘价的涨跌距离。
 
 ```text
 DATA_DIR=/opt/mybot-codex/data
@@ -214,24 +283,79 @@ T1_LATE_OPP_MAX_ASK=0.30
 盘口过滤条件。
 
 ```text
-T1_LATE_TARGET_QTY=2000
+T1_LATE_TARGET_QTY=5000
 ```
 
-目标份额。实际成交还会受顶档 ask size 和资金上限限制。
+目标份额。两个策略共用。实际成交还会受顶档 ask size 和资金上限限制。
 
 ```text
 T1_LATE_START_EQUITY=300
-T1_LATE_RISK_FRACTION=1
-T1_LATE_MAX_DEPLOY_USDC=0
+T1_LATE_RISK_FRACTION=0.2
+T1_LATE_MAX_DEPLOY_USDC=500
 ```
 
 dry-run 资金模型。
 
 - `T1_LATE_START_EQUITY=300`: 模拟初始本金 300u。
-- `T1_LATE_RISK_FRACTION=1`: 每盘最多用当前模拟权益的 100%。
-- `T1_LATE_RISK_FRACTION=0.25`: 每盘最多用当前模拟权益的 25%。
+- `T1_LATE_RISK_FRACTION=0.2`: 每盘最多用当前模拟权益的 20%。
+- `T1_LATE_MAX_DEPLOY_USDC=500`: 每个盘口最多部署 500u。
 - `T1_LATE_MAX_DEPLOY_USDC=0`: 不设置固定单盘口上限。
-- `T1_LATE_MAX_DEPLOY_USDC=300`: 每个盘口最多部署 300u。
+
+```text
+BTC_DISTANCE_TAIL_MAX_SECS=2
+BTC_DISTANCE_START_CAPTURE_MIN_SECS=295
+BTC_DISTANCE_MAX_ASK=0.99
+BTC_DISTANCE_MAX_SPREAD=0.10
+BTC_DISTANCE_EXCLUDE_ASK_LOW=0.85
+BTC_DISTANCE_EXCLUDE_ASK_HIGH=0.90
+BTC_DISTANCE_MIN_ABS_BPS=0
+```
+
+BTC 距离策略参数。
+
+- `BTC_DISTANCE_TAIL_MAX_SECS=2`: T-2 开始允许入场；T-2 不合格时 T-1 兜底。
+- `BTC_DISTANCE_START_CAPTURE_MIN_SECS=295`: 只在盘口刚开始时记录 BTC 基准价；中途重启会跳过当前盘口。
+- `BTC_DISTANCE_MAX_ASK=0.99`: 选中方向最高可买 ask。
+- `BTC_DISTANCE_MAX_SPREAD=0.10`: 选中方向最大 spread。
+- `BTC_DISTANCE_EXCLUDE_ASK_LOW/HIGH=0.85/0.90`: 跳过回测中表现差的半强价格带。
+- `BTC_DISTANCE_MIN_ABS_BPS=0`: 只要求 BTC 距离不等于 0。
+
+```text
+BTC_LADDER_EARLY_SECS=60
+BTC_LADDER_EARLY_BUDGET_FRAC=0.05
+BTC_LADDER_EARLY_MIN_ABS_BPS=10
+BTC_LADDER_EARLY_MIN_SCORE=2.5
+BTC_LADDER_EARLY_MAX_ASK=0.95
+BTC_LADDER_EARLY_MAX_SPREAD=0.10
+```
+
+分层策略 early 层。T-60 开始看，BTC 距离和强度必须很高，最多只补到单盘口风险上限的 5%。
+
+```text
+BTC_LADDER_MID_SECS=5
+BTC_LADDER_MID_BUDGET_FRAC=0.40
+BTC_LADDER_MID_MIN_ABS_BPS=1
+BTC_LADDER_MID_MIN_SCORE=0.5
+BTC_LADDER_MID_MAX_ASK=0.99
+BTC_LADDER_MID_MAX_SPREAD=0.10
+BTC_LADDER_MID_EXCLUDE_ASK_LOW=0.85
+BTC_LADDER_MID_EXCLUDE_ASK_HIGH=0.90
+```
+
+分层策略 mid 层。T-5 开始看，最多补到单盘口风险上限的 40%，并跳过 `0.85~0.90` 的坏价格带。
+
+```text
+BTC_LADDER_TAIL_SECS=2
+BTC_LADDER_TAIL_BUDGET_FRAC=1.0
+BTC_LADDER_TAIL_MIN_ABS_BPS=0
+BTC_LADDER_TAIL_MIN_SCORE=0
+BTC_LADDER_TAIL_MAX_ASK=0.98
+BTC_LADDER_TAIL_MAX_SPREAD=0.10
+BTC_LADDER_TAIL_EXCLUDE_ASK_LOW=0.85
+BTC_LADDER_TAIL_EXCLUDE_ASK_HIGH=0.90
+```
+
+分层策略 tail 层。T-2/T-1 才允许补到 100%，但默认不吃 `0.99` 的极贵 ask。
 
 ```text
 REST_FALLBACK_TIMEOUT_MS=700
@@ -245,17 +369,20 @@ REST_FALLBACK_TIMEOUT_MS=700
 src/main.rs
 ```
 
-机器人主程序。负责读配置、连接 Polymarket、订阅盘口、执行 T-1 策略、记录状态、结算 dry-run PnL。
+机器人主程序。负责读配置、连接 Polymarket、订阅盘口和 BTC 价格、执行 taker 策略、记录状态、结算 dry-run PnL。
 
 主要代码块:
 
 - `Config`: 从 `.env` 读取所有配置。
 - `ClobClient`: 通过 REST 查当前 BTC 5m 市场、盘口、结算赢家。
 - `MarketWs`: 连接 Polymarket market WebSocket，维护顶档盘口缓存。
+- `BtcPriceWs`: 订阅 Polymarket RTDS BTC 价格，维护最新 `btc/usd`。
 - `OrderBook`: 保存 Up/Down 的 asks/bids。
 - `State` / `Trade`: 保存 dry-run 交易记录和结算结果。
 - `Bot::run_once`: 每轮主循环，找市场、取盘口、检查结算、调用策略。
-- `Bot::decide_t1_late`: T-10/T-8/T-1 策略核心。
+- `Bot::decide_btc_distance_ladder`: BTC 距离分层策略核心。
+- `Bot::decide_btc_distance_tail`: BTC 距离尾盘策略核心。
+- `Bot::decide_t1_late`: 旧 T-10/T-8/T-1 策略核心。
 - `OrderExecutor`: dry-run 或真实 FAK 下单的统一入口。
 
 ```text
@@ -301,6 +428,10 @@ data/t1_late_signals.jsonl
 常见 `phase`:
 
 - `market`: 发现新的 5 分钟盘口。
+- `btc_distance_start`: 记录本盘 BTC 基准价。
+- `btc_distance_block`: BTC 距离策略被条件拦截，不入场。
+- `btc_distance_ladder_entry`: BTC 距离分层策略 dry-run 成交。
+- `btc_distance_tail_entry`: BTC 距离策略 dry-run 成交。
 - `t1_late_tail`: 尾盘盘口快照。
 - `t1_late_book_missing`: 尾盘缺少 ask，无法判断。
 - `t1_late_confirm1`: T-10 确认成功。
@@ -343,8 +474,8 @@ jytd
 
 1. `DRY_RUN=1` 连续跑满一天。
 2. `jytd` 能正常显示模拟交易和结算。
-3. `t1_late_signals.jsonl` 里 T-10/T-8/T-1 盘口字段完整。
+3. `t1_late_signals.jsonl` 里 `btc_distance_start`、`btc_distance_ladder_entry`、`intent`、`submit`、`settled` 字段完整。
 4. 现场盘口和历史 Telonex 字段口径一致。
-5. 明确接受 `T1_LATE_RISK_FRACTION=1` 的高风险含义。
+5. 明确接受 `T1_LATE_RISK_FRACTION=0.2` 和 `T1_LATE_MAX_DEPLOY_USDC=500` 的风险边界。
 
-历史回测不是未来收益保证。`T1_LATE_RISK_FRACTION=1` 等于每盘最多投入当前全部模拟权益，未来只要错一盘，可能接近打穿账户。
+历史回测不是未来收益保证。当前最佳回测仍然存在约 -500u 的单盘口亏损和约 1107.88u 的最大回撤，必须先 dry-run 验证 T-5/T-2/T-1 真实可成交性、RTDS 延迟和时间戳对齐。

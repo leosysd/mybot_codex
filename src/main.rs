@@ -43,15 +43,25 @@ async fn main() -> Result<()> {
     }
 
     info!(
-        "mybot-codex dry_run={} strategy=t1_late target_qty={} poll={}ms",
-        cfg.dry_run, cfg.target_qty, cfg.poll_ms
+        "mybot-codex dry_run={} strategy={} target_qty={} poll={}ms",
+        cfg.dry_run, cfg.strategy, cfg.target_qty, cfg.poll_ms
     );
 
     let cache = new_book_cache();
+    let btc_price = new_btc_price_cache();
     let ws = MarketWs::new(cfg.market_ws_url.clone(), cache.clone());
     let _ws_task = ws.clone().run();
+    let btc_ws = BtcPriceWs::new(
+        cfg.btc_price_ws_url.clone(),
+        cfg.btc_price_topic.clone(),
+        cfg.btc_price_type.clone(),
+        cfg.btc_price_filters.clone(),
+        cfg.btc_price_symbol.clone(),
+        btc_price.clone(),
+    );
+    let _btc_task = btc_ws.run();
     let executor = Arc::new(OrderExecutor::new(&cfg).await?);
-    let mut bot = Bot::new(cfg, cache, ws, executor).await?;
+    let mut bot = Bot::new(cfg, cache, ws, btc_price, executor).await?;
     let poll = tokio::time::Duration::from_millis(bot.cfg.poll_ms);
 
     loop {
@@ -72,6 +82,7 @@ async fn main() -> Result<()> {
 #[derive(Clone, Debug)]
 struct Config {
     dry_run: bool,
+    strategy: String,
     private_key: Option<String>,
     deposit_wallet: Option<String>,
     signature_type: u8,
@@ -80,6 +91,12 @@ struct Config {
     gamma_api_url: String,
     market_ws_url: String,
     market_slug_prefix: String,
+    btc_price_ws_url: String,
+    btc_price_topic: String,
+    btc_price_type: String,
+    btc_price_filters: String,
+    btc_price_symbol: String,
+    btc_price_max_age_ms: i64,
     data_dir: PathBuf,
     signal_file: PathBuf,
     state_file: PathBuf,
@@ -95,6 +112,35 @@ struct Config {
     risk_fraction: f64,
     max_deploy_usdc: f64,
     rest_fallback_timeout_ms: u64,
+    btc_tail_max_secs: i64,
+    btc_start_capture_min_secs: i64,
+    btc_distance_max_ask: f64,
+    btc_distance_max_spread: f64,
+    btc_distance_exclude_ask_low: f64,
+    btc_distance_exclude_ask_high: f64,
+    btc_distance_min_abs_bps: f64,
+    btc_ladder_early_secs: i64,
+    btc_ladder_early_budget_frac: f64,
+    btc_ladder_early_min_abs_bps: f64,
+    btc_ladder_early_min_score: f64,
+    btc_ladder_early_max_ask: f64,
+    btc_ladder_early_max_spread: f64,
+    btc_ladder_mid_secs: i64,
+    btc_ladder_mid_budget_frac: f64,
+    btc_ladder_mid_min_abs_bps: f64,
+    btc_ladder_mid_min_score: f64,
+    btc_ladder_mid_max_ask: f64,
+    btc_ladder_mid_max_spread: f64,
+    btc_ladder_mid_exclude_ask_low: f64,
+    btc_ladder_mid_exclude_ask_high: f64,
+    btc_ladder_tail_secs: i64,
+    btc_ladder_tail_budget_frac: f64,
+    btc_ladder_tail_min_abs_bps: f64,
+    btc_ladder_tail_min_score: f64,
+    btc_ladder_tail_max_ask: f64,
+    btc_ladder_tail_max_spread: f64,
+    btc_ladder_tail_exclude_ask_low: f64,
+    btc_ladder_tail_exclude_ask_high: f64,
 }
 
 impl Config {
@@ -102,6 +148,7 @@ impl Config {
         let data_dir = PathBuf::from(env("DATA_DIR", "data"));
         Ok(Self {
             dry_run: env_bool("DRY_RUN", true),
+            strategy: env("STRATEGY", "btc_distance_ladder"),
             private_key: env_opt("PRIVATE_KEY"),
             deposit_wallet: env_opt("DEPOSIT_WALLET_ADDRESS"),
             signature_type: env_u64("SIGNATURE_TYPE", 3) as u8,
@@ -113,6 +160,12 @@ impl Config {
                 "wss://ws-subscriptions-clob.polymarket.com/ws/market",
             ),
             market_slug_prefix: env("MARKET_SLUG_PREFIX", "btc-updown-5m"),
+            btc_price_ws_url: env("BTC_PRICE_WS_URL", "wss://ws-live-data.polymarket.com"),
+            btc_price_topic: env("BTC_PRICE_TOPIC", "crypto_prices_chainlink"),
+            btc_price_type: env("BTC_PRICE_TYPE", "*"),
+            btc_price_filters: env("BTC_PRICE_FILTERS", r#"{"symbol":"btc/usd"}"#),
+            btc_price_symbol: env("BTC_PRICE_SYMBOL", "btc/usd"),
+            btc_price_max_age_ms: env_i64("BTC_PRICE_MAX_AGE_MS", 3000),
             signal_file: PathBuf::from(env("SIGNAL_FILE", "data/t1_late_signals.jsonl")),
             state_file: PathBuf::from(env("STATE_FILE", "data/t1_late_state.json")),
             data_dir,
@@ -123,11 +176,40 @@ impl Config {
             confirm_min_ask: env_f64("T1_LATE_CONFIRM_MIN_ASK", 0.98),
             entry_min_ask: env_f64("T1_LATE_ENTRY_MIN_ASK", 0.75),
             opp_max_ask: env_f64("T1_LATE_OPP_MAX_ASK", 0.30),
-            target_qty: env_f64("T1_LATE_TARGET_QTY", 2000.0),
+            target_qty: env_f64("T1_LATE_TARGET_QTY", 5000.0),
             start_equity: env_f64("T1_LATE_START_EQUITY", 300.0),
-            risk_fraction: env_f64("T1_LATE_RISK_FRACTION", 1.0),
-            max_deploy_usdc: env_f64("T1_LATE_MAX_DEPLOY_USDC", 0.0),
+            risk_fraction: env_f64("T1_LATE_RISK_FRACTION", 0.2),
+            max_deploy_usdc: env_f64("T1_LATE_MAX_DEPLOY_USDC", 500.0),
             rest_fallback_timeout_ms: env_u64("REST_FALLBACK_TIMEOUT_MS", 700),
+            btc_tail_max_secs: env_i64("BTC_DISTANCE_TAIL_MAX_SECS", 2),
+            btc_start_capture_min_secs: env_i64("BTC_DISTANCE_START_CAPTURE_MIN_SECS", 295),
+            btc_distance_max_ask: env_f64("BTC_DISTANCE_MAX_ASK", 0.99),
+            btc_distance_max_spread: env_f64("BTC_DISTANCE_MAX_SPREAD", 0.10),
+            btc_distance_exclude_ask_low: env_f64("BTC_DISTANCE_EXCLUDE_ASK_LOW", 0.85),
+            btc_distance_exclude_ask_high: env_f64("BTC_DISTANCE_EXCLUDE_ASK_HIGH", 0.90),
+            btc_distance_min_abs_bps: env_f64("BTC_DISTANCE_MIN_ABS_BPS", 0.0),
+            btc_ladder_early_secs: env_i64("BTC_LADDER_EARLY_SECS", 60),
+            btc_ladder_early_budget_frac: env_f64("BTC_LADDER_EARLY_BUDGET_FRAC", 0.05),
+            btc_ladder_early_min_abs_bps: env_f64("BTC_LADDER_EARLY_MIN_ABS_BPS", 10.0),
+            btc_ladder_early_min_score: env_f64("BTC_LADDER_EARLY_MIN_SCORE", 2.5),
+            btc_ladder_early_max_ask: env_f64("BTC_LADDER_EARLY_MAX_ASK", 0.95),
+            btc_ladder_early_max_spread: env_f64("BTC_LADDER_EARLY_MAX_SPREAD", 0.10),
+            btc_ladder_mid_secs: env_i64("BTC_LADDER_MID_SECS", 5),
+            btc_ladder_mid_budget_frac: env_f64("BTC_LADDER_MID_BUDGET_FRAC", 0.40),
+            btc_ladder_mid_min_abs_bps: env_f64("BTC_LADDER_MID_MIN_ABS_BPS", 1.0),
+            btc_ladder_mid_min_score: env_f64("BTC_LADDER_MID_MIN_SCORE", 0.5),
+            btc_ladder_mid_max_ask: env_f64("BTC_LADDER_MID_MAX_ASK", 0.99),
+            btc_ladder_mid_max_spread: env_f64("BTC_LADDER_MID_MAX_SPREAD", 0.10),
+            btc_ladder_mid_exclude_ask_low: env_f64("BTC_LADDER_MID_EXCLUDE_ASK_LOW", 0.85),
+            btc_ladder_mid_exclude_ask_high: env_f64("BTC_LADDER_MID_EXCLUDE_ASK_HIGH", 0.90),
+            btc_ladder_tail_secs: env_i64("BTC_LADDER_TAIL_SECS", 2),
+            btc_ladder_tail_budget_frac: env_f64("BTC_LADDER_TAIL_BUDGET_FRAC", 1.0),
+            btc_ladder_tail_min_abs_bps: env_f64("BTC_LADDER_TAIL_MIN_ABS_BPS", 0.0),
+            btc_ladder_tail_min_score: env_f64("BTC_LADDER_TAIL_MIN_SCORE", 0.0),
+            btc_ladder_tail_max_ask: env_f64("BTC_LADDER_TAIL_MAX_ASK", 0.98),
+            btc_ladder_tail_max_spread: env_f64("BTC_LADDER_TAIL_MAX_SPREAD", 0.10),
+            btc_ladder_tail_exclude_ask_low: env_f64("BTC_LADDER_TAIL_EXCLUDE_ASK_LOW", 0.85),
+            btc_ladder_tail_exclude_ask_high: env_f64("BTC_LADDER_TAIL_EXCLUDE_ASK_HIGH", 0.90),
         })
     }
 }
@@ -208,12 +290,138 @@ impl OrderBook {
     fn best_ask_size(&self) -> Option<f64> {
         self.asks.first().map(|(_, s)| *s)
     }
+
+    fn best_bid(&self) -> Option<f64> {
+        self.bids.first().map(|(p, _)| *p)
+    }
 }
 
 type BookCache = Arc<RwLock<HashMap<String, OrderBook>>>;
 
 fn new_book_cache() -> BookCache {
     Arc::new(RwLock::new(HashMap::new()))
+}
+
+#[derive(Clone, Debug)]
+struct BtcTick {
+    value: f64,
+    timestamp_ms: i64,
+    received_ms: i64,
+}
+
+type BtcPriceCache = Arc<RwLock<Option<BtcTick>>>;
+
+fn new_btc_price_cache() -> BtcPriceCache {
+    Arc::new(RwLock::new(None))
+}
+
+struct BtcPriceWs {
+    url: String,
+    topic: String,
+    msg_type: String,
+    filters: String,
+    symbol: String,
+    cache: BtcPriceCache,
+}
+
+impl BtcPriceWs {
+    fn new(
+        url: String,
+        topic: String,
+        msg_type: String,
+        filters: String,
+        symbol: String,
+        cache: BtcPriceCache,
+    ) -> Self {
+        Self {
+            url,
+            topic,
+            msg_type,
+            filters,
+            symbol: symbol.to_lowercase(),
+            cache,
+        }
+    }
+
+    fn run(self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = self.connect_once().await {
+                    warn!("btc price ws error: {e:#}");
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            }
+        })
+    }
+
+    async fn connect_once(&self) -> Result<()> {
+        let (ws_stream, _) = connect_async(&self.url).await?;
+        info!("btc price ws connected {}", self.url);
+        let (mut write, mut read) = ws_stream.split();
+        let sub = json!({
+            "action": "subscribe",
+            "subscriptions": [{
+                "topic": self.topic,
+                "type": self.msg_type,
+                "filters": self.filters,
+            }]
+        });
+        write.send(Message::Text(sub.to_string().into())).await?;
+        let mut ping = tokio::time::interval(tokio::time::Duration::from_secs(5));
+
+        loop {
+            tokio::select! {
+                _ = ping.tick() => {
+                    let _ = write.send(Message::Text("PING".into())).await;
+                }
+                msg = read.next() => {
+                    let Some(msg) = msg else { return Ok(()); };
+                    match msg? {
+                        Message::Text(text) => self.handle_message(&text).await,
+                        Message::Ping(data) => { let _ = write.send(Message::Pong(data)).await; }
+                        Message::Close(_) => return Ok(()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_message(&self, text: &str) {
+        let Ok(data): Result<serde_json::Value, _> = serde_json::from_str(text) else {
+            return;
+        };
+        let Some(payload) = data.get("payload") else {
+            return;
+        };
+        if let Some(tick) = self.tick_from_payload(payload) {
+            let mut cache = self.cache.write().await;
+            *cache = Some(tick);
+        }
+    }
+
+    fn tick_from_payload(&self, payload: &serde_json::Value) -> Option<BtcTick> {
+        if let Some(arr) = payload.get("data").and_then(|v| v.as_array()) {
+            return arr.iter().rev().find_map(|v| self.tick_from_payload(v));
+        }
+        let symbol = payload.get("symbol")?.as_str()?.to_lowercase();
+        if symbol != self.symbol {
+            return None;
+        }
+        let value = payload.get("value")?.as_f64()?;
+        if !value.is_finite() || value <= 0.0 {
+            return None;
+        }
+        let timestamp_ms = payload
+            .get("timestamp")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_else(|| Utc::now().timestamp_millis());
+        Some(BtcTick {
+            value,
+            timestamp_ms,
+            received_ms: Utc::now().timestamp_millis(),
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -532,6 +740,25 @@ impl State {
         self.trades.iter().any(|t| t.market == slug)
     }
 
+    fn ladder_position(&self, slug: &str) -> LadderPosition {
+        let mut pos = LadderPosition::default();
+        for t in self
+            .trades
+            .iter()
+            .filter(|t| t.market == slug && t.strategy.as_deref() == Some("btc_distance_ladder"))
+        {
+            if pos.side.is_none() {
+                pos.side = Some(t.side.clone());
+            }
+            if let Some(tier) = &t.tier {
+                pos.used_tiers.insert(tier.clone());
+            }
+            pos.total_cost += t.cost;
+            pos.total_shares += t.shares;
+        }
+        pos
+    }
+
     fn pending_markets(&self) -> Vec<String> {
         let mut out = Vec::new();
         for t in &self.trades {
@@ -547,11 +774,16 @@ impl State {
 struct Trade {
     market: String,
     end_ts: i64,
+    strategy: Option<String>,
+    tier: Option<String>,
     side: String,
     price: f64,
     shares: f64,
     cost: f64,
     ts: i64,
+    btc_start_price: Option<f64>,
+    btc_entry_price: Option<f64>,
+    btc_from_start_bps: Option<f64>,
     winner: Option<String>,
     pnl: Option<f64>,
 }
@@ -567,15 +799,57 @@ struct T1State {
     locked: bool,
 }
 
+#[derive(Clone, Default)]
+struct LadderPosition {
+    side: Option<String>,
+    used_tiers: HashSet<String>,
+    total_cost: f64,
+    total_shares: f64,
+}
+
+#[derive(Clone, Copy)]
+struct BtcLadderTier {
+    label: &'static str,
+    max_secs: i64,
+    budget_frac: f64,
+    min_abs_bps: f64,
+    min_score: f64,
+    max_ask: f64,
+    max_spread: f64,
+    exclude_ask_low: f64,
+    exclude_ask_high: f64,
+}
+
+struct TopQuote {
+    ask: Option<f64>,
+    ask_size: Option<f64>,
+    bid: Option<f64>,
+    source: &'static str,
+}
+
+impl TopQuote {
+    fn missing(source: &'static str) -> Self {
+        Self {
+            ask: None,
+            ask_size: None,
+            bid: None,
+            source,
+        }
+    }
+}
+
 struct Bot {
     cfg: Config,
     client: ClobClient,
     executor: Arc<OrderExecutor>,
     cache: BookCache,
     ws: MarketWs,
+    btc_price: BtcPriceCache,
     market: Option<Market>,
     state: State,
     t1: HashMap<String, T1State>,
+    btc_start: HashMap<String, f64>,
+    btc_locked: HashSet<String>,
     last_settlement_check: i64,
     last_tail_log_ts: i64,
 }
@@ -585,6 +859,7 @@ impl Bot {
         cfg: Config,
         cache: BookCache,
         ws: MarketWs,
+        btc_price: BtcPriceCache,
         executor: Arc<OrderExecutor>,
     ) -> Result<Self> {
         let client = ClobClient::new(&cfg)?;
@@ -595,9 +870,12 @@ impl Bot {
             executor,
             cache,
             ws,
+            btc_price,
             market: None,
             state,
             t1: HashMap::new(),
+            btc_start: HashMap::new(),
+            btc_locked: HashSet::new(),
             last_settlement_check: 0,
             last_tail_log_ts: 0,
         })
@@ -632,19 +910,19 @@ impl Bot {
         let dn_token = &market.token_ids[dn_idx];
         let tail_window = seconds_left <= self.cfg.confirm1_secs + 20;
 
-        let (up_ask, up_size, up_source) = self.top_ask(up_token, tail_window).await;
-        let (dn_ask, dn_size, dn_source) = self.top_ask(dn_token, tail_window).await;
-        let (Some(up_ask), Some(dn_ask)) = (up_ask, dn_ask) else {
+        let up_quote = self.top_quote(up_token, tail_window).await;
+        let dn_quote = self.top_quote(dn_token, tail_window).await;
+        let (Some(up_ask), Some(dn_ask)) = (up_quote.ask, dn_quote.ask) else {
             if tail_window && now > self.last_tail_log_ts {
                 self.last_tail_log_ts = now;
                 self.signal(json!({
                     "phase": "t1_late_book_missing",
                     "market": market.slug,
                     "seconds_left": seconds_left,
-                    "up_has_ask": up_ask.is_some(),
-                    "dn_has_ask": dn_ask.is_some(),
-                    "up_source": up_source,
-                    "dn_source": dn_source,
+                    "up_has_ask": up_quote.ask.is_some(),
+                    "dn_has_ask": dn_quote.ask.is_some(),
+                    "up_source": up_quote.source,
+                    "dn_source": dn_quote.source,
                     "ts": now,
                 }))
                 .await?;
@@ -660,24 +938,52 @@ impl Bot {
                 "seconds_left": seconds_left,
                 "up_ask": up_ask,
                 "dn_ask": dn_ask,
-                "up_size": up_size,
-                "dn_size": dn_size,
-                "up_source": up_source,
-                "dn_source": dn_source,
+                "up_bid": up_quote.bid,
+                "dn_bid": dn_quote.bid,
+                "up_size": up_quote.ask_size,
+                "dn_size": dn_quote.ask_size,
+                "up_source": up_quote.source,
+                "dn_source": dn_quote.source,
                 "ts": now,
             }))
             .await?;
         }
 
-        self.decide_t1_late(
-            &market,
-            up_ask,
-            up_size.unwrap_or(0.0),
-            dn_ask,
-            dn_size.unwrap_or(0.0),
-            seconds_left,
-        )
-        .await
+        if self.cfg.strategy == "btc_distance_ladder" {
+            self.decide_btc_distance_ladder(
+                &market,
+                up_ask,
+                up_quote.bid,
+                up_quote.ask_size.unwrap_or(0.0),
+                dn_ask,
+                dn_quote.bid,
+                dn_quote.ask_size.unwrap_or(0.0),
+                seconds_left,
+            )
+            .await
+        } else if self.cfg.strategy == "btc_distance_tail" {
+            self.decide_btc_distance_tail(
+                &market,
+                up_ask,
+                up_quote.bid,
+                up_quote.ask_size.unwrap_or(0.0),
+                dn_ask,
+                dn_quote.bid,
+                dn_quote.ask_size.unwrap_or(0.0),
+                seconds_left,
+            )
+            .await
+        } else {
+            self.decide_t1_late(
+                &market,
+                up_ask,
+                up_quote.ask_size.unwrap_or(0.0),
+                dn_ask,
+                dn_quote.ask_size.unwrap_or(0.0),
+                seconds_left,
+            )
+            .await
+        }
     }
 
     async fn current_market(&mut self) -> Option<Market> {
@@ -710,21 +1016,22 @@ impl Bot {
         Some(market)
     }
 
-    async fn top_ask(
-        &self,
-        token_id: &str,
-        allow_rest: bool,
-    ) -> (Option<f64>, Option<f64>, &'static str) {
+    async fn top_quote(&self, token_id: &str, allow_rest: bool) -> TopQuote {
         {
             let cache = self.cache.read().await;
             if let Some(book) = cache.get(token_id) {
-                if let Some(ask) = book.best_ask() {
-                    return (Some(ask), book.best_ask_size(), "ws");
+                if book.best_ask().is_some() || book.best_bid().is_some() {
+                    return TopQuote {
+                        ask: book.best_ask(),
+                        ask_size: book.best_ask_size(),
+                        bid: book.best_bid(),
+                        source: "ws",
+                    };
                 }
             }
         }
         if !allow_rest {
-            return (None, None, "missing");
+            return TopQuote::missing("missing");
         }
         let fetch = tokio::time::timeout(
             tokio::time::Duration::from_millis(self.cfg.rest_fallback_timeout_ms),
@@ -732,15 +1039,754 @@ impl Bot {
         )
         .await;
         let Ok(Ok(book)) = fetch else {
-            return (None, None, "rest_failed");
+            return TopQuote::missing("rest_failed");
         };
-        let ask = book.best_ask();
-        let size = book.best_ask_size();
+        let quote = TopQuote {
+            ask: book.best_ask(),
+            ask_size: book.best_ask_size(),
+            bid: book.best_bid(),
+            source: "rest",
+        };
         {
             let mut cache = self.cache.write().await;
             cache.insert(token_id.to_string(), book);
         }
-        (ask, size, "rest")
+        quote
+    }
+
+    async fn latest_btc_tick(&self) -> Option<BtcTick> {
+        self.btc_price.read().await.clone()
+    }
+
+    fn btc_tick_age_ms(tick: &BtcTick) -> i64 {
+        Utc::now().timestamp_millis() - tick.received_ms
+    }
+
+    async fn maybe_capture_btc_start(
+        &mut self,
+        market: &Market,
+        seconds_left: i64,
+    ) -> Result<()> {
+        if self.btc_start.contains_key(&market.slug) {
+            return Ok(());
+        }
+        if seconds_left < self.cfg.btc_start_capture_min_secs {
+            return Ok(());
+        }
+        let Some(tick) = self.latest_btc_tick().await else {
+            return Ok(());
+        };
+        if Self::btc_tick_age_ms(&tick) > self.cfg.btc_price_max_age_ms {
+            return Ok(());
+        }
+        self.btc_start.insert(market.slug.clone(), tick.value);
+        self.signal(json!({
+            "phase": "btc_distance_start",
+            "market": market.slug,
+            "seconds_left": seconds_left,
+            "btc_start_price": tick.value,
+            "btc_price_ts_ms": tick.timestamp_ms,
+            "btc_received_ms": tick.received_ms,
+            "ts": Utc::now().timestamp(),
+        }))
+        .await?;
+        Ok(())
+    }
+
+    async fn btc_distance_block(
+        &mut self,
+        market: &Market,
+        reason: &str,
+        seconds_left: i64,
+        extra: serde_json::Value,
+    ) -> Result<()> {
+        if seconds_left <= 1 {
+            self.btc_locked.insert(market.slug.clone());
+        }
+        let mut rec = json!({
+            "phase": "btc_distance_block",
+            "reason": reason,
+            "market": market.slug,
+            "seconds_left": seconds_left,
+            "ts": Utc::now().timestamp(),
+        });
+        if let (Some(obj), Some(extra_obj)) = (rec.as_object_mut(), extra.as_object()) {
+            for (k, v) in extra_obj {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        self.signal(rec).await
+    }
+
+    fn btc_ladder_tiers(&self) -> [BtcLadderTier; 3] {
+        [
+            BtcLadderTier {
+                label: "early",
+                max_secs: self.cfg.btc_ladder_early_secs,
+                budget_frac: self.cfg.btc_ladder_early_budget_frac,
+                min_abs_bps: self.cfg.btc_ladder_early_min_abs_bps,
+                min_score: self.cfg.btc_ladder_early_min_score,
+                max_ask: self.cfg.btc_ladder_early_max_ask,
+                max_spread: self.cfg.btc_ladder_early_max_spread,
+                exclude_ask_low: 0.0,
+                exclude_ask_high: 0.0,
+            },
+            BtcLadderTier {
+                label: "mid",
+                max_secs: self.cfg.btc_ladder_mid_secs,
+                budget_frac: self.cfg.btc_ladder_mid_budget_frac,
+                min_abs_bps: self.cfg.btc_ladder_mid_min_abs_bps,
+                min_score: self.cfg.btc_ladder_mid_min_score,
+                max_ask: self.cfg.btc_ladder_mid_max_ask,
+                max_spread: self.cfg.btc_ladder_mid_max_spread,
+                exclude_ask_low: self.cfg.btc_ladder_mid_exclude_ask_low,
+                exclude_ask_high: self.cfg.btc_ladder_mid_exclude_ask_high,
+            },
+            BtcLadderTier {
+                label: "tail",
+                max_secs: self.cfg.btc_ladder_tail_secs,
+                budget_frac: self.cfg.btc_ladder_tail_budget_frac,
+                min_abs_bps: self.cfg.btc_ladder_tail_min_abs_bps,
+                min_score: self.cfg.btc_ladder_tail_min_score,
+                max_ask: self.cfg.btc_ladder_tail_max_ask,
+                max_spread: self.cfg.btc_ladder_tail_max_spread,
+                exclude_ask_low: self.cfg.btc_ladder_tail_exclude_ask_low,
+                exclude_ask_high: self.cfg.btc_ladder_tail_exclude_ask_high,
+            },
+        ]
+    }
+
+    fn btc_ladder_score(abs_bps: f64, seconds_left: i64) -> f64 {
+        abs_bps / ((seconds_left + 1).max(1) as f64).sqrt()
+    }
+
+    fn btc_ladder_excluded_ask(tier: BtcLadderTier, ask: f64) -> bool {
+        tier.exclude_ask_high > tier.exclude_ask_low
+            && ask >= tier.exclude_ask_low
+            && ask < tier.exclude_ask_high
+    }
+
+    fn btc_ladder_tier_allowed(
+        tier: BtcLadderTier,
+        seconds_left: i64,
+        abs_bps: f64,
+        score: f64,
+        ask: f64,
+        spread: f64,
+    ) -> bool {
+        seconds_left <= tier.max_secs
+            && abs_bps >= tier.min_abs_bps
+            && score >= tier.min_score
+            && ask <= tier.max_ask
+            && spread <= tier.max_spread
+            && !Self::btc_ladder_excluded_ask(tier, ask)
+    }
+
+    async fn decide_btc_distance_ladder(
+        &mut self,
+        market: &Market,
+        up_ask: f64,
+        up_bid: Option<f64>,
+        up_size: f64,
+        dn_ask: f64,
+        dn_bid: Option<f64>,
+        dn_size: f64,
+        seconds_left: i64,
+    ) -> Result<()> {
+        self.maybe_capture_btc_start(market, seconds_left).await?;
+        if self.btc_locked.contains(&market.slug) {
+            return Ok(());
+        }
+        if self.state.trades.iter().any(|t| {
+            t.market == market.slug && t.strategy.as_deref() != Some("btc_distance_ladder")
+        }) {
+            self.btc_locked.insert(market.slug.clone());
+            return Ok(());
+        }
+        let tiers = self.btc_ladder_tiers();
+        let first_secs = tiers.iter().map(|t| t.max_secs).max().unwrap_or(0);
+        let tail_budget_frac = tiers
+            .iter()
+            .find(|t| t.label == "tail")
+            .map(|t| t.budget_frac)
+            .unwrap_or(1.0);
+        if seconds_left > first_secs {
+            return Ok(());
+        }
+
+        let Some(tick) = self.latest_btc_tick().await else {
+            if seconds_left <= self.cfg.btc_ladder_tail_secs {
+                return self
+                    .btc_distance_block(market, "btc_price_missing", seconds_left, json!({}))
+                    .await;
+            }
+            return Ok(());
+        };
+        let btc_age_ms = Self::btc_tick_age_ms(&tick);
+        if btc_age_ms > self.cfg.btc_price_max_age_ms {
+            if seconds_left <= self.cfg.btc_ladder_tail_secs {
+                return self
+                    .btc_distance_block(
+                        market,
+                        "btc_price_stale",
+                        seconds_left,
+                        json!({
+                            "btc_price": tick.value,
+                            "btc_age_ms": btc_age_ms,
+                            "max_age_ms": self.cfg.btc_price_max_age_ms,
+                        }),
+                    )
+                    .await;
+            }
+            return Ok(());
+        }
+        let Some(start_price) = self.btc_start.get(&market.slug).copied() else {
+            if seconds_left <= self.cfg.btc_ladder_tail_secs {
+                return self
+                    .btc_distance_block(
+                        market,
+                        "btc_start_missing",
+                        seconds_left,
+                        json!({
+                            "btc_entry_price": tick.value,
+                            "start_capture_min_secs": self.cfg.btc_start_capture_min_secs,
+                        }),
+                    )
+                    .await;
+            }
+            return Ok(());
+        };
+
+        let bps = (tick.value / start_price - 1.0) * 10000.0;
+        if bps == 0.0 {
+            if seconds_left <= self.cfg.btc_ladder_tail_secs {
+                return self
+                    .btc_distance_block(
+                        market,
+                        "btc_distance_zero",
+                        seconds_left,
+                        json!({
+                            "btc_start_price": start_price,
+                            "btc_entry_price": tick.value,
+                            "btc_from_start_bps": bps,
+                        }),
+                    )
+                    .await;
+            }
+            return Ok(());
+        }
+
+        let (side, ask, bid, ask_size) = if bps > 0.0 {
+            ("Up", up_ask, up_bid, up_size)
+        } else {
+            ("Down", dn_ask, dn_bid, dn_size)
+        };
+        let Some(bid) = bid else {
+            if seconds_left <= self.cfg.btc_ladder_tail_secs {
+                return self
+                    .btc_distance_block(
+                        market,
+                        "bid_missing",
+                        seconds_left,
+                        json!({
+                            "side": side,
+                            "ask": ask,
+                            "btc_from_start_bps": bps,
+                        }),
+                    )
+                    .await;
+            }
+            return Ok(());
+        };
+        let spread = ask - bid;
+        let abs_bps = bps.abs();
+        let score = Self::btc_ladder_score(abs_bps, seconds_left);
+        let pos = self.state.ladder_position(&market.slug);
+        if let Some(position_side) = &pos.side {
+            if position_side != side {
+                if seconds_left <= self.cfg.btc_ladder_tail_secs {
+                    self.btc_locked.insert(market.slug.clone());
+                    return self
+                        .btc_distance_block(
+                            market,
+                            "ladder_side_flipped",
+                            seconds_left,
+                            json!({
+                                "position_side": position_side,
+                                "current_side": side,
+                                "btc_from_start_bps": bps,
+                            }),
+                        )
+                        .await;
+                }
+                return Ok(());
+            }
+        }
+
+        let equity = (self.cfg.start_equity + self.state.realized_pnl()).max(0.0);
+        let mut max_deploy = f64::INFINITY;
+        if self.cfg.risk_fraction > 0.0 {
+            max_deploy = max_deploy.min(equity * self.cfg.risk_fraction);
+        }
+        if self.cfg.max_deploy_usdc > 0.0 {
+            max_deploy = max_deploy.min(self.cfg.max_deploy_usdc);
+        }
+        if !max_deploy.is_finite() {
+            max_deploy = self.cfg.target_qty * full_cost_per_share(ask);
+        }
+        if pos.total_cost >= max_deploy * tail_budget_frac - 1.0
+            || pos.total_shares >= self.cfg.target_qty
+        {
+            self.btc_locked.insert(market.slug.clone());
+            return Ok(());
+        }
+
+        let mut selected: Option<BtcLadderTier> = None;
+        let mut desired_total_cost = pos.total_cost;
+        for tier in tiers {
+            if !Self::btc_ladder_tier_allowed(tier, seconds_left, abs_bps, score, ask, spread) {
+                continue;
+            }
+            let tier_desired_total = max_deploy * tier.budget_frac;
+            if tier_desired_total > desired_total_cost + 1.0 {
+                selected = Some(tier);
+                desired_total_cost = tier_desired_total;
+            }
+        }
+        let Some(tier) = selected else {
+            if seconds_left <= self.cfg.btc_ladder_tail_secs {
+                self.btc_locked.insert(market.slug.clone());
+                return self
+                    .btc_distance_block(
+                        market,
+                        "ladder_no_eligible_tier",
+                        seconds_left,
+                        json!({
+                            "side": side,
+                            "ask": ask,
+                            "bid": bid,
+                            "spread": spread,
+                            "btc_from_start_bps": bps,
+                            "btc_distance_score": score,
+                            "current_cost": pos.total_cost,
+                            "max_deploy": max_deploy,
+                        }),
+                    )
+                    .await;
+            }
+            return Ok(());
+        };
+
+        let additional_budget = desired_total_cost - pos.total_cost;
+        let remaining_qty = self.cfg.target_qty - pos.total_shares;
+        let cost_per_share = full_cost_per_share(ask);
+        let planned = remaining_qty
+            .min(ask_size.floor())
+            .min((additional_budget / cost_per_share).floor());
+        let planned_cost = planned * cost_per_share;
+        if planned < 1.0 || planned_cost < 1.0 {
+            if seconds_left <= self.cfg.btc_ladder_tail_secs {
+                self.btc_locked.insert(market.slug.clone());
+            }
+            return self
+                .btc_distance_block(
+                    market,
+                    "ladder_planned_order_too_small",
+                    seconds_left,
+                    json!({
+                        "tier": tier.label,
+                        "side": side,
+                        "ask": ask,
+                        "ask_size": ask_size,
+                        "equity": equity,
+                        "max_deploy": max_deploy,
+                        "current_cost": pos.total_cost,
+                        "desired_total_cost": desired_total_cost,
+                        "additional_budget": additional_budget,
+                        "remaining_qty": remaining_qty,
+                        "planned_shares": planned,
+                        "planned_cost": planned_cost,
+                    }),
+                )
+                .await;
+        }
+
+        self.signal(json!({
+            "phase": "intent",
+            "label": "btc_distance_ladder_entry",
+            "tier": tier.label,
+            "market": market.slug,
+            "direction": side,
+            "price": ask,
+            "bid": bid,
+            "spread": spread,
+            "shares": planned,
+            "ask_size": ask_size,
+            "equity": equity,
+            "max_deploy": max_deploy,
+            "current_cost": pos.total_cost,
+            "desired_total_cost": desired_total_cost,
+            "planned_cost": planned_cost,
+            "btc_start_price": start_price,
+            "btc_entry_price": tick.value,
+            "btc_from_start_bps": bps,
+            "btc_distance_score": score,
+            "btc_price_age_ms": btc_age_ms,
+            "seconds_left": seconds_left,
+            "mode": "dry_run_fak",
+            "ts": Utc::now().timestamp(),
+        }))
+        .await?;
+
+        let token = market
+            .token_for(side)
+            .ok_or_else(|| anyhow!("missing token for side {side}"))?;
+        let fill = self.executor.buy_fak(token, ask, planned, Some(ask)).await?;
+        self.signal(json!({
+            "phase": "submit",
+            "label": "btc_distance_ladder_entry",
+            "tier": tier.label,
+            "market": market.slug,
+            "direction": side,
+            "order_id": fill.order_id,
+            "status": fill.status,
+            "success": fill.success,
+            "simulated": fill.simulated,
+            "filled_price": fill.filled_price,
+            "filled_shares": fill.filled_shares,
+            "ts": Utc::now().timestamp(),
+        }))
+        .await?;
+
+        if !fill.success || fill.filled_shares <= 0.0 {
+            warn!("BTC ladder FAK produced no fill for {}", market.slug);
+            return Ok(());
+        }
+
+        let filled_price = fill.filled_price;
+        let filled_shares = fill.filled_shares;
+        let filled_cost_per_share = full_cost_per_share(filled_price);
+        let filled_cost = filled_shares * filled_cost_per_share;
+        self.state.trades.push(Trade {
+            market: market.slug.clone(),
+            end_ts: market.end_ts,
+            strategy: Some("btc_distance_ladder".to_string()),
+            tier: Some(tier.label.to_string()),
+            side: side.to_string(),
+            price: filled_price,
+            shares: filled_shares,
+            cost: filled_cost,
+            ts: Utc::now().timestamp(),
+            btc_start_price: Some(start_price),
+            btc_entry_price: Some(tick.value),
+            btc_from_start_bps: Some(bps),
+            winner: None,
+            pnl: None,
+        });
+        self.state.save(&self.cfg.state_file).await?;
+        let new_total_cost = pos.total_cost + filled_cost;
+        if new_total_cost >= max_deploy * tail_budget_frac - 1.0
+            || pos.total_shares + filled_shares >= self.cfg.target_qty
+            || tier.label == "tail"
+        {
+            self.btc_locked.insert(market.slug.clone());
+        }
+        self.signal(json!({
+            "phase": "btc_distance_ladder_entry",
+            "market": market.slug,
+            "tier": tier.label,
+            "direction": side,
+            "price": filled_price,
+            "shares": filled_shares,
+            "full_cost": filled_cost_per_share,
+            "total_cost": filled_cost,
+            "market_cost_after": new_total_cost,
+            "btc_start_price": start_price,
+            "btc_entry_price": tick.value,
+            "btc_from_start_bps": bps,
+            "btc_distance_score": score,
+            "dry_run": self.cfg.dry_run,
+            "ts": Utc::now().timestamp(),
+        }))
+        .await?;
+        info!(
+            "BTC ladder {} entry {} {} @ {:.3} x {:.0} cost {:.2} bps={:.4} score={:.4} dry_run={}",
+            tier.label, market.slug, side, filled_price, filled_shares, filled_cost, bps, score, self.cfg.dry_run
+        );
+        Ok(())
+    }
+
+    async fn decide_btc_distance_tail(
+        &mut self,
+        market: &Market,
+        up_ask: f64,
+        up_bid: Option<f64>,
+        up_size: f64,
+        dn_ask: f64,
+        dn_bid: Option<f64>,
+        dn_size: f64,
+        seconds_left: i64,
+    ) -> Result<()> {
+        self.maybe_capture_btc_start(market, seconds_left).await?;
+        if self.state.has_trade(&market.slug) {
+            self.btc_locked.insert(market.slug.clone());
+            return Ok(());
+        }
+        if self.btc_locked.contains(&market.slug) {
+            return Ok(());
+        }
+        if seconds_left > self.cfg.btc_tail_max_secs {
+            return Ok(());
+        }
+
+        let Some(tick) = self.latest_btc_tick().await else {
+            return self
+                .btc_distance_block(market, "btc_price_missing", seconds_left, json!({}))
+                .await;
+        };
+        let btc_age_ms = Self::btc_tick_age_ms(&tick);
+        if btc_age_ms > self.cfg.btc_price_max_age_ms {
+            return self
+                .btc_distance_block(
+                    market,
+                    "btc_price_stale",
+                    seconds_left,
+                    json!({
+                        "btc_price": tick.value,
+                        "btc_age_ms": btc_age_ms,
+                        "max_age_ms": self.cfg.btc_price_max_age_ms,
+                    }),
+                )
+                .await;
+        }
+        let Some(start_price) = self.btc_start.get(&market.slug).copied() else {
+            return self
+                .btc_distance_block(
+                    market,
+                    "btc_start_missing",
+                    seconds_left,
+                    json!({
+                        "btc_entry_price": tick.value,
+                        "start_capture_min_secs": self.cfg.btc_start_capture_min_secs,
+                    }),
+                )
+                .await;
+        };
+        let bps = (tick.value / start_price - 1.0) * 10000.0;
+        let abs_bps = bps.abs();
+        if bps == 0.0 || abs_bps < self.cfg.btc_distance_min_abs_bps {
+            return self
+                .btc_distance_block(
+                    market,
+                    "btc_distance_too_small",
+                    seconds_left,
+                    json!({
+                        "btc_start_price": start_price,
+                        "btc_entry_price": tick.value,
+                        "btc_from_start_bps": bps,
+                        "min_abs_bps": self.cfg.btc_distance_min_abs_bps,
+                    }),
+                )
+                .await;
+        }
+
+        let (side, ask, bid, ask_size) = if bps > 0.0 {
+            ("Up", up_ask, up_bid, up_size)
+        } else {
+            ("Down", dn_ask, dn_bid, dn_size)
+        };
+        let Some(bid) = bid else {
+            return self
+                .btc_distance_block(
+                    market,
+                    "bid_missing",
+                    seconds_left,
+                    json!({
+                        "side": side,
+                        "ask": ask,
+                        "btc_from_start_bps": bps,
+                    }),
+                )
+                .await;
+        };
+        let spread = ask - bid;
+        if ask > self.cfg.btc_distance_max_ask {
+            return self
+                .btc_distance_block(
+                    market,
+                    "ask_too_high",
+                    seconds_left,
+                    json!({
+                        "side": side,
+                        "ask": ask,
+                        "max_ask": self.cfg.btc_distance_max_ask,
+                        "btc_from_start_bps": bps,
+                    }),
+                )
+                .await;
+        }
+        if spread > self.cfg.btc_distance_max_spread {
+            return self
+                .btc_distance_block(
+                    market,
+                    "spread_too_wide",
+                    seconds_left,
+                    json!({
+                        "side": side,
+                        "ask": ask,
+                        "bid": bid,
+                        "spread": spread,
+                        "max_spread": self.cfg.btc_distance_max_spread,
+                        "btc_from_start_bps": bps,
+                    }),
+                )
+                .await;
+        }
+        if ask >= self.cfg.btc_distance_exclude_ask_low
+            && ask < self.cfg.btc_distance_exclude_ask_high
+        {
+            return self
+                .btc_distance_block(
+                    market,
+                    "excluded_ask_band",
+                    seconds_left,
+                    json!({
+                        "side": side,
+                        "ask": ask,
+                        "exclude_low": self.cfg.btc_distance_exclude_ask_low,
+                        "exclude_high": self.cfg.btc_distance_exclude_ask_high,
+                        "btc_from_start_bps": bps,
+                    }),
+                )
+                .await;
+        }
+
+        let equity = (self.cfg.start_equity + self.state.realized_pnl()).max(0.0);
+        let mut max_deploy = f64::INFINITY;
+        if self.cfg.risk_fraction > 0.0 {
+            max_deploy = max_deploy.min(equity * self.cfg.risk_fraction);
+        }
+        if self.cfg.max_deploy_usdc > 0.0 {
+            max_deploy = max_deploy.min(self.cfg.max_deploy_usdc);
+        }
+        if !max_deploy.is_finite() {
+            max_deploy = self.cfg.target_qty * full_cost_per_share(ask);
+        }
+        let cost_per_share = full_cost_per_share(ask);
+        let planned = self
+            .cfg
+            .target_qty
+            .min(ask_size.floor())
+            .min((max_deploy / cost_per_share).floor());
+        let planned_cost = planned * cost_per_share;
+        if planned < 1.0 || planned_cost < 1.0 {
+            return self
+                .btc_distance_block(
+                    market,
+                    "planned_order_too_small",
+                    seconds_left,
+                    json!({
+                        "side": side,
+                        "ask": ask,
+                        "ask_size": ask_size,
+                        "equity": equity,
+                        "max_deploy": max_deploy,
+                        "planned_shares": planned,
+                        "planned_cost": planned_cost,
+                    }),
+                )
+                .await;
+        }
+
+        self.btc_locked.insert(market.slug.clone());
+        self.signal(json!({
+            "phase": "intent",
+            "label": "btc_distance_tail_entry",
+            "market": market.slug,
+            "direction": side,
+            "price": ask,
+            "bid": bid,
+            "spread": spread,
+            "shares": planned,
+            "ask_size": ask_size,
+            "equity": equity,
+            "max_deploy": max_deploy,
+            "planned_cost": planned_cost,
+            "btc_start_price": start_price,
+            "btc_entry_price": tick.value,
+            "btc_from_start_bps": bps,
+            "btc_price_age_ms": btc_age_ms,
+            "seconds_left": seconds_left,
+            "mode": "dry_run_fak",
+            "ts": Utc::now().timestamp(),
+        }))
+        .await?;
+
+        let token = market
+            .token_for(side)
+            .ok_or_else(|| anyhow!("missing token for side {side}"))?;
+        let fill = self.executor.buy_fak(token, ask, planned, Some(ask)).await?;
+        self.signal(json!({
+            "phase": "submit",
+            "label": "btc_distance_tail_entry",
+            "market": market.slug,
+            "direction": side,
+            "order_id": fill.order_id,
+            "status": fill.status,
+            "success": fill.success,
+            "simulated": fill.simulated,
+            "filled_price": fill.filled_price,
+            "filled_shares": fill.filled_shares,
+            "ts": Utc::now().timestamp(),
+        }))
+        .await?;
+
+        if !fill.success || fill.filled_shares <= 0.0 {
+            warn!("BTC distance FAK produced no fill for {}", market.slug);
+            return Ok(());
+        }
+
+        let filled_price = fill.filled_price;
+        let filled_shares = fill.filled_shares;
+        let filled_cost_per_share = full_cost_per_share(filled_price);
+        let filled_cost = filled_shares * filled_cost_per_share;
+        self.state.trades.push(Trade {
+            market: market.slug.clone(),
+            end_ts: market.end_ts,
+            strategy: Some("btc_distance_tail".to_string()),
+            tier: None,
+            side: side.to_string(),
+            price: filled_price,
+            shares: filled_shares,
+            cost: filled_cost,
+            ts: Utc::now().timestamp(),
+            btc_start_price: Some(start_price),
+            btc_entry_price: Some(tick.value),
+            btc_from_start_bps: Some(bps),
+            winner: None,
+            pnl: None,
+        });
+        self.state.save(&self.cfg.state_file).await?;
+        self.signal(json!({
+            "phase": "btc_distance_tail_entry",
+            "market": market.slug,
+            "direction": side,
+            "price": filled_price,
+            "shares": filled_shares,
+            "full_cost": filled_cost_per_share,
+            "total_cost": filled_cost,
+            "btc_start_price": start_price,
+            "btc_entry_price": tick.value,
+            "btc_from_start_bps": bps,
+            "dry_run": self.cfg.dry_run,
+            "ts": Utc::now().timestamp(),
+        }))
+        .await?;
+        info!(
+            "BTC distance entry {} {} @ {:.3} x {:.0} cost {:.2} bps={:.4} dry_run={}",
+            market.slug, side, filled_price, filled_shares, filled_cost, bps, self.cfg.dry_run
+        );
+        Ok(())
     }
 
     async fn decide_t1_late(
@@ -1023,11 +2069,16 @@ impl Bot {
         self.state.trades.push(Trade {
             market: market.slug.clone(),
             end_ts: market.end_ts,
+            strategy: Some("t1_late".to_string()),
+            tier: None,
             side: side.to_string(),
             price: filled_price,
             shares: filled_shares,
             cost: filled_cost,
             ts: Utc::now().timestamp(),
+            btc_start_price: None,
+            btc_entry_price: None,
+            btc_from_start_bps: None,
             winner: None,
             pnl: None,
         });

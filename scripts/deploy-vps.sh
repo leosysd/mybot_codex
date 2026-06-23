@@ -53,6 +53,19 @@ install -m 755 /tmp/jytd.py /usr/local/bin/jytd
 chmod +x /tmp/install-mybot-codex.sh
 /tmp/install-mybot-codex.sh "$DATA_DIR" "$SERVICE" "$REMOTE_BIN"
 
+set_env() {
+  local key="$1"
+  local value="$2"
+  if grep -q "^${key}=" "$DATA_DIR/.env"; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$DATA_DIR/.env"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$DATA_DIR/.env"
+  fi
+}
+
+set_env DRY_RUN 1
+set_env STRATEGY btc_distance_ladder
+
 systemctl restart "$SERVICE"
 sleep 2
 
@@ -65,7 +78,7 @@ systemctl show "$SERVICE.service" -p ActiveState -p SubState -p MainPID -p Memor
 echo "existing jy-bot left untouched:"
 systemctl show jy-bot.service -p ActiveState -p SubState -p MainPID 2>/dev/null || true
 echo "safe env:"
-grep -nE '^(DRY_RUN|MARKET_SLUG_PREFIX|POLL_MS|T1_LATE_[A-Z0-9_]+|REST_FALLBACK_TIMEOUT_MS)=' "$DATA_DIR/.env"
+grep -nE '^(DRY_RUN|STRATEGY|MARKET_SLUG_PREFIX|POLL_MS|BTC_PRICE_[A-Z0-9_]+|BTC_DISTANCE_[A-Z0-9_]+|BTC_LADDER_[A-Z0-9_]+|T1_LATE_[A-Z0-9_]+|REST_FALLBACK_TIMEOUT_MS)=' "$DATA_DIR/.env"
 REMOTE
 
 echo "[4/5] journal"

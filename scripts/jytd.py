@@ -114,15 +114,16 @@ def build_rows(trades: list[dict[str, Any]]) -> tuple[list[list[str]], dict[str,
         label = f"{bj_hm(start_ts)}~{bj_hm(end_ts)}" if end_ts else "-"
         n = len(market_trades)
         last = market_trades[-1]
-        pnl = last.get("pnl")
+        settled_pnls = [t.get("pnl") for t in market_trades if t.get("pnl") is not None]
+        is_settled = len(settled_pnls) == len(market_trades)
+        pnl = sum(float(x) for x in settled_pnls) if is_settled else None
         winner = last.get("winner")
         if pnl is None:
             stats["holding"] += 1
         else:
             stats["settled"] += 1
-            pnl_f = float(pnl)
-            stats["net"] += pnl_f
-            if pnl_f >= 0:
+            stats["net"] += pnl
+            if pnl >= 0:
                 stats["wins"] += 1
             else:
                 stats["losses"] += 1
@@ -139,6 +140,14 @@ def build_rows(trades: list[dict[str, Any]]) -> tuple[list[list[str]], dict[str,
                     result = str(winner or "-")
                     pnl_text = fmt_num(pnl, signed=True)
             ts = int(trade.get("ts") or start_ts)
+            strategy = str(trade.get("strategy") or "")
+            tier = str(trade.get("tier") or "")
+            if strategy == "btc_distance_ladder":
+                phase = f"距离-{tier}" if tier else "距离分层"
+            elif strategy == "btc_distance_tail":
+                phase = "BTC距离"
+            else:
+                phase = "T1尾盘"
             rows.append(
                 [
                     label if i == 0 else "",
@@ -147,7 +156,7 @@ def build_rows(trades: list[dict[str, Any]]) -> tuple[list[list[str]], dict[str,
                     fmt_num(trade.get("price"), 3),
                     fmt_num(trade.get("shares"), 0),
                     fmt_num(trade.get("cost") or trade.get("total_cost"), 2),
-                    "T1尾盘",
+                    phase,
                     result,
                     pnl_text,
                 ]

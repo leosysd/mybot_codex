@@ -33,6 +33,7 @@ ssh "${SSH_OPTS[@]}" -MNf "$SSH_HOST" 2>/dev/null || true
 scp "${SSH_OPTS[@]}" "$LOCAL_BIN" "$SSH_HOST:$remote_tmp"
 scp "${SSH_OPTS[@]}" scripts/install-systemd.sh "$SSH_HOST:/tmp/install-mybot-codex.sh"
 scp "${SSH_OPTS[@]}" scripts/jytd.py "$SSH_HOST:/tmp/jytd.py"
+scp "${SSH_OPTS[@]}" scripts/jydiag.py "$SSH_HOST:/tmp/jydiag.py"
 
 echo "[3/5] install/restart mybot-codex service"
 ssh "${SSH_OPTS[@]}" "$SSH_HOST" \
@@ -53,6 +54,7 @@ if [ -f "$REMOTE_BIN" ]; then
 fi
 install -m 755 "$REMOTE_TMP" "$REMOTE_BIN"
 install -m 755 /tmp/jytd.py /usr/local/bin/jytd
+install -m 755 /tmp/jydiag.py /usr/local/bin/jydiag
 chmod +x /tmp/install-mybot-codex.sh
 /tmp/install-mybot-codex.sh "$DATA_DIR" "$SERVICE" "$REMOTE_BIN"
 
@@ -107,6 +109,8 @@ echo "binary:"
 sha256sum "$REMOTE_BIN"
 echo "jytd:"
 ls -l /usr/local/bin/jytd
+echo "jydiag:"
+ls -l /usr/local/bin/jydiag
 echo "service:"
 systemctl show "$SERVICE.service" -p ActiveState -p SubState -p MainPID -p MemoryCurrent -p MemoryPeak -p NRestarts
 echo "existing jy-bot left untouched:"

@@ -221,6 +221,14 @@ jytd
 盘口时间 | 秒 | 方向 | 价格 | 份额 | 成本 | 阶段 | 结果 | 盈亏
 ```
 
+看 Candidate B 诊断:
+
+```bash
+jydiag
+```
+
+`jydiag` 会统计最近 24 小时信号：phase 计数、Candidate B 的 block 原因、tier reject、缺 ask 秒点、intent/submit/entry 数量、BTC tick age，以及按层级 PnL。
+
 重启新机器人:
 
 ```bash
@@ -460,6 +468,12 @@ scripts/jytd.py
 交易统计表命令。部署后安装为 `/usr/local/bin/jytd`。默认读取 `/opt/mybot-codex/data/t1_late_state.json`，输出老机器人同风格表格。
 
 ```text
+scripts/jydiag.py
+```
+
+Candidate B 诊断命令。部署后安装为 `/usr/local/bin/jydiag`。默认读取 `/opt/mybot-codex/.env`、state 和 signals，输出最近 24 小时触发/拦截/缺盘口/延迟统计。
+
+```text
 Cargo.toml / Cargo.lock
 ```
 
@@ -520,6 +534,26 @@ jytd
 
   已结算 N 盘  胜 W / 负 L  胜率 X.X%   锁定中 0  持仓中 H
   已实现净盈亏: $+0.00
+```
+
+## 诊断统计
+
+直接运行:
+
+```bash
+jydiag
+```
+
+只看最近 4 小时:
+
+```bash
+jydiag --hours 4
+```
+
+看全部已加载信号:
+
+```bash
+jydiag --hours 0
 ```
 
 ## 实盘前检查

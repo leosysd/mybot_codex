@@ -12,6 +12,8 @@ LOCAL_BIN="${LOCAL_BIN:-target/release/mybot-codex}"
 SERVICE="mybot-codex"
 DATA_DIR="/opt/mybot-codex"
 REMOTE_BIN="/usr/local/bin/mybot-codex"
+CONTROL_PATH="${CONTROL_PATH:-/tmp/mybot-codex-ssh-%r@%h:%p}"
+SSH_OPTS=(-F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 -o ControlMaster=auto -o ControlPersist=90 -o ControlPath="$CONTROL_PATH")
 
 if [ ! -x "$LOCAL_BIN" ]; then
   echo "missing executable binary: $LOCAL_BIN" >&2
@@ -27,12 +29,13 @@ echo "  path: $LOCAL_BIN"
 echo "  sha256: $local_hash"
 
 echo "[2/5] upload binary and installer"
-scp -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 "$LOCAL_BIN" "$SSH_HOST:$remote_tmp"
-scp -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 scripts/install-systemd.sh "$SSH_HOST:/tmp/install-mybot-codex.sh"
-scp -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 scripts/jytd.py "$SSH_HOST:/tmp/jytd.py"
+ssh "${SSH_OPTS[@]}" -MNf "$SSH_HOST" 2>/dev/null || true
+scp "${SSH_OPTS[@]}" "$LOCAL_BIN" "$SSH_HOST:$remote_tmp"
+scp "${SSH_OPTS[@]}" scripts/install-systemd.sh "$SSH_HOST:/tmp/install-mybot-codex.sh"
+scp "${SSH_OPTS[@]}" scripts/jytd.py "$SSH_HOST:/tmp/jytd.py"
 
 echo "[3/5] install/restart mybot-codex service"
-ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 "$SSH_HOST" \
+ssh "${SSH_OPTS[@]}" "$SSH_HOST" \
   "REMOTE_TMP='$remote_tmp' REMOTE_BIN='$REMOTE_BIN' DATA_DIR='$DATA_DIR' SERVICE='$SERVICE' EXPECTED_HASH='$local_hash' bash -s" <<'REMOTE'
 set -euo pipefail
 
@@ -65,6 +68,32 @@ set_env() {
 
 set_env DRY_RUN 1
 set_env STRATEGY btc_distance_ladder
+set_env T1_LATE_TARGET_QTY 5000
+set_env T1_LATE_START_EQUITY 300
+set_env T1_LATE_RISK_FRACTION 0.2
+set_env T1_LATE_MAX_DEPLOY_USDC 500
+set_env BTC_LADDER_EARLY_SECS 60
+set_env BTC_LADDER_EARLY_BUDGET_FRAC 0.05
+set_env BTC_LADDER_EARLY_MIN_ABS_BPS 10
+set_env BTC_LADDER_EARLY_MIN_SCORE 2.5
+set_env BTC_LADDER_EARLY_MAX_ASK 0.95
+set_env BTC_LADDER_EARLY_MAX_SPREAD 0.10
+set_env BTC_LADDER_MID_SECS 5
+set_env BTC_LADDER_MID_BUDGET_FRAC 0.40
+set_env BTC_LADDER_MID_MIN_ABS_BPS 1
+set_env BTC_LADDER_MID_MIN_SCORE 0.5
+set_env BTC_LADDER_MID_MAX_ASK 0.99
+set_env BTC_LADDER_MID_MAX_SPREAD 0.10
+set_env BTC_LADDER_MID_EXCLUDE_ASK_LOW 0.85
+set_env BTC_LADDER_MID_EXCLUDE_ASK_HIGH 0.90
+set_env BTC_LADDER_TAIL_SECS 2
+set_env BTC_LADDER_TAIL_BUDGET_FRAC 1.0
+set_env BTC_LADDER_TAIL_MIN_ABS_BPS 0
+set_env BTC_LADDER_TAIL_MIN_SCORE 0
+set_env BTC_LADDER_TAIL_MAX_ASK 0.98
+set_env BTC_LADDER_TAIL_MAX_SPREAD 0.10
+set_env BTC_LADDER_TAIL_EXCLUDE_ASK_LOW 0.85
+set_env BTC_LADDER_TAIL_EXCLUDE_ASK_HIGH 0.90
 
 systemctl restart "$SERVICE"
 sleep 2
@@ -82,9 +111,9 @@ grep -nE '^(DRY_RUN|STRATEGY|MARKET_SLUG_PREFIX|POLL_MS|BTC_PRICE_[A-Z0-9_]+|BTC
 REMOTE
 
 echo "[4/5] journal"
-ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 "$SSH_HOST" \
+ssh "${SSH_OPTS[@]}" "$SSH_HOST" \
   "journalctl -u ${SERVICE}.service --since '3 minutes ago' --no-pager | tail -80"
 
 echo "[5/5] recent signals"
-ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=20 "$SSH_HOST" \
+ssh "${SSH_OPTS[@]}" "$SSH_HOST" \
   "tail -80 ${DATA_DIR}/data/t1_late_signals.jsonl 2>/dev/null || true"

@@ -75,14 +75,34 @@ def since_filter(rows: list[dict[str, Any]], hours: float) -> list[dict[str, Any
     return [r for r in rows if int(r.get("ts") or 0) >= cutoff]
 
 
-def since_last_service_start(rows: list[dict[str, Any]], enabled: bool) -> list[dict[str, Any]]:
-    if not enabled:
-        return rows
+def latest_service_start_ts(rows: list[dict[str, Any]]) -> int | None:
     starts = [int(r.get("ts") or 0) for r in rows if r.get("phase") == "service_start"]
     if not starts:
+        return None
+    return max(starts)
+
+
+def since_ts(rows: list[dict[str, Any]], cutoff: int | None) -> list[dict[str, Any]]:
+    if cutoff is None:
         return rows
-    cutoff = max(starts)
     return [r for r in rows if int(r.get("ts") or 0) >= cutoff]
+
+
+def trade_ts(trade: dict[str, Any]) -> int:
+    for key in ("ts", "entry_ts", "created_ts"):
+        try:
+            value = int(trade.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
+def trades_since_ts(trades: list[dict[str, Any]], cutoff: int | None) -> list[dict[str, Any]]:
+    if cutoff is None:
+        return trades
+    return [trade for trade in trades if trade_ts(trade) >= cutoff]
 
 
 def fmt_money(value: Any) -> str:
@@ -297,8 +317,10 @@ def main() -> int:
     )
     trades = load_state(state_path)
     loaded_signals = iter_jsonl(signal_path, args.max_lines)
+    service_start = None if args.all_starts else latest_service_start_ts(loaded_signals)
     signals = since_filter(loaded_signals, args.hours)
-    signals = since_last_service_start(signals, not args.all_starts)
+    signals = since_ts(signals, service_start)
+    trades = trades_since_ts(trades, service_start)
 
     print("mybot-codex 诊断")
     print(f"  env={env_path}")
@@ -307,6 +329,11 @@ def main() -> int:
     print(f"  state={state_path}")
     print(f"  signals={signal_path}")
     print(f"  signal_rows={len(signals)} hours={args.hours:g} since_latest_start={not args.all_starts}")
+    if service_start is not None:
+        started = dt.datetime.fromtimestamp(service_start, dt.timezone.utc).astimezone(
+            dt.timezone(dt.timedelta(hours=8))
+        )
+        print(f"  latest_service_start={started:%Y-%m-%d %H:%M:%S} BJT")
     if env.get("STRATEGY") == "btc_oracle_fallback":
         print("  oracle_profile=" + env.get("BTC_ORACLE_PROFILE", "-"))
         print(

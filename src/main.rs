@@ -402,12 +402,16 @@ impl BtcPriceWs {
 
     fn tick_from_payload(&self, payload: &serde_json::Value) -> Option<BtcTick> {
         if let Some(arr) = payload.get("data").and_then(|v| v.as_array()) {
-            return arr.iter().rev().find_map(|v| self.tick_from_payload(v));
+            return arr.iter().rev().find_map(Self::tick_from_price_point);
         }
         let symbol = payload.get("symbol")?.as_str()?.to_lowercase();
         if symbol != self.symbol {
             return None;
         }
+        Self::tick_from_price_point(payload)
+    }
+
+    fn tick_from_price_point(payload: &serde_json::Value) -> Option<BtcTick> {
         let value = payload.get("value")?.as_f64()?;
         if !value.is_finite() || value <= 0.0 {
             return None;

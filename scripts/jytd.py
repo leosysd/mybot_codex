@@ -58,6 +58,17 @@ def resolve_state_path(env_path: Path, override: str | None) -> Path | str:
     return env_path.parent / path
 
 
+def resolve_signal_path(env_path: Path, override: str | None = None) -> Path | str:
+    if override:
+        return override if override == "-" else Path(override)
+    env = read_env(env_path)
+    raw = env.get("SIGNAL_FILE", "/opt/mybot-codex/data/t1_late_signals.jsonl")
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    return env_path.parent / path
+
+
 def load_state(path: Path | str) -> list[dict[str, Any]]:
     if path == "-":
         text = sys.stdin.read()
@@ -79,6 +90,51 @@ def load_state(path: Path | str) -> list[dict[str, Any]]:
         return data
     print("✖ 状态文件格式不认识")
     return []
+
+
+def latest_service_start(path: Path | str) -> int | None:
+    if path == "-":
+        return None
+    p = Path(path)
+    if not p.exists():
+        return None
+    latest: int | None = None
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict) and row.get("phase") == "service_start":
+            try:
+                ts = int(row.get("ts") or 0)
+            except (TypeError, ValueError):
+                continue
+            latest = ts if latest is None else max(latest, ts)
+    return latest
+
+
+def trade_ts(trade: dict[str, Any]) -> int:
+    for key in ("ts", "entry_ts", "created_ts"):
+        try:
+            value = int(trade.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
+def filter_since_service_start(
+    trades: list[dict[str, Any]], signal_path: Path | str, all_starts: bool
+) -> tuple[list[dict[str, Any]], int | None]:
+    if all_starts:
+        return trades, None
+    cutoff = latest_service_start(signal_path)
+    if cutoff is None:
+        return trades, None
+    return [trade for trade in trades if trade_ts(trade) >= cutoff], cutoff
 
 
 def fmt_num(value: Any, decimals: int = 2, signed: bool = False) -> str:
@@ -194,14 +250,26 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Show mybot-codex trading stats table.")
     ap.add_argument("--env", default=os.environ.get("MYBOT_CODEX_ENV", DEFAULT_ENV))
     ap.add_argument("--state", default="")
+    ap.add_argument("--signals", default="")
+    ap.add_argument(
+        "--all-starts",
+        action="store_true",
+        help="include trades before the latest service_start marker",
+    )
     args = ap.parse_args()
 
     env_path = Path(args.env)
     state_path = resolve_state_path(env_path, args.state or None)
+    signal_path = resolve_signal_path(env_path, args.signals or None)
     trades = load_state(state_path)
+    trades, service_start = filter_since_service_start(trades, signal_path, args.all_starts)
     if not trades:
         if state_path != "-" and not Path(state_path).exists():
             print(f"ℹ 暂无数据文件 {state_path}")
+        elif service_start is not None:
+            print("ℹ 最新服务启动后暂无交易记录")
+            print(f"  服务启动: {bj_hm(service_start)}")
+            print(f"  查看历史全部: jytd --all-starts")
         else:
             print("ℹ 暂无交易记录")
         return 0
@@ -220,6 +288,9 @@ def main() -> int:
     )
     print(f"  已实现净盈亏: ${stats['net']:+.2f}")
     print(f"  状态文件: {state_path}")
+    if service_start is not None:
+        print(f"  统计范围: 最新服务启动后 ({bj_hm(service_start)} 起)")
+        print("  查看历史全部: jytd --all-starts")
     return 0
 
 

@@ -221,6 +221,8 @@ jytd
 盘口时间 | 秒 | 方向 | 价格 | 份额 | 成本 | 阶段 | 结果 | 盈亏
 ```
 
+默认只显示最近一次 `service_start` 之后的交易；需要包含历史旧启动周期时加 `jytd --all-starts`。
+
 看 Candidate C 诊断:
 
 ```bash
@@ -229,7 +231,7 @@ jydiag
 
 `jydiag` 会统计最近 24 小时信号：phase 计数、Candidate C 的 block 原因、tier reject、缺 ask 秒点、intent/submit/entry 数量、BTC tick age，以及按层级 PnL。
 默认只统计最近一次 `service_start` 之后的信号；需要包含旧启动周期时加 `--all-starts`。
-`jytd` 交易统计表会显示每笔 `BTC涨跌bp`，也就是入场时 BTC 相对本盘开盘价的涨跌幅；正数买 Up，负数买 Down。
+`jytd` 交易统计表会显示每笔 `BTC涨跌bp`，也就是入场时 BTC 相对本盘开盘价的涨跌幅；正数买 Up，负数买 Down。默认只看最新服务启动后的交易，避免旧版本交易混进当前验证。
 `jydiag` 会额外汇总各 tier 的 BTC 入场涨跌 bp，方便检查策略是不是真的在按 BTC 偏离强弱下单。
 
 重启新机器人:
@@ -476,7 +478,7 @@ scripts/deploy-vps.sh
 scripts/jytd.py
 ```
 
-交易统计表命令。部署后安装为 `/usr/local/bin/jytd`。默认读取 `/opt/mybot-codex/data/t1_late_state.json`，输出老机器人同风格表格。
+交易统计表命令。部署后安装为 `/usr/local/bin/jytd`。默认读取 `/opt/mybot-codex/data/t1_late_state.json`，输出老机器人同风格表格；默认只显示最新 `service_start` 之后的交易，`--all-starts` 显示历史全部。
 
 ```text
 scripts/jydiag.py
@@ -527,6 +529,12 @@ data/t1_late_signals.jsonl
 
 ```bash
 jytd
+```
+
+看历史全部启动周期:
+
+```bash
+jytd --all-starts
 ```
 
 如果没有交易，会显示:

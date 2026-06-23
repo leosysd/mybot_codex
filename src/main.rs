@@ -395,6 +395,12 @@ impl BtcPriceWs {
             return;
         };
         if let Some(tick) = self.tick_from_payload(payload) {
+            if tick.timestamp_ms.rem_euclid(60_000) == 0 {
+                info!(
+                    "btc price tick {} value {:.2} ts_ms={}",
+                    self.symbol, tick.value, tick.timestamp_ms
+                );
+            }
             let mut cache = self.cache.write().await;
             *cache = Some(tick);
         }
@@ -853,6 +859,7 @@ struct Bot {
     state: State,
     t1: HashMap<String, T1State>,
     btc_start: HashMap<String, f64>,
+    btc_start_wait_logged: HashSet<String>,
     btc_locked: HashSet<String>,
     last_settlement_check: i64,
     last_tail_log_ts: i64,
@@ -879,6 +886,7 @@ impl Bot {
             state,
             t1: HashMap::new(),
             btc_start: HashMap::new(),
+            btc_start_wait_logged: HashSet::new(),
             btc_locked: HashSet::new(),
             last_settlement_check: 0,
             last_tail_log_ts: 0,
@@ -1081,9 +1089,33 @@ impl Bot {
             return Ok(());
         }
         let Some(tick) = self.latest_btc_tick().await else {
+            if self.btc_start_wait_logged.insert(market.slug.clone()) {
+                self.signal(json!({
+                    "phase": "btc_distance_start_wait",
+                    "reason": "btc_price_missing",
+                    "market": market.slug,
+                    "seconds_left": seconds_left,
+                    "ts": Utc::now().timestamp(),
+                }))
+                .await?;
+            }
             return Ok(());
         };
-        if Self::btc_tick_age_ms(&tick) > self.cfg.btc_price_max_age_ms {
+        let btc_age_ms = Self::btc_tick_age_ms(&tick);
+        if btc_age_ms > self.cfg.btc_price_max_age_ms {
+            if self.btc_start_wait_logged.insert(market.slug.clone()) {
+                self.signal(json!({
+                    "phase": "btc_distance_start_wait",
+                    "reason": "btc_price_stale",
+                    "market": market.slug,
+                    "seconds_left": seconds_left,
+                    "btc_price": tick.value,
+                    "btc_age_ms": btc_age_ms,
+                    "max_age_ms": self.cfg.btc_price_max_age_ms,
+                    "ts": Utc::now().timestamp(),
+                }))
+                .await?;
+            }
             return Ok(());
         }
         self.btc_start.insert(market.slug.clone(), tick.value);

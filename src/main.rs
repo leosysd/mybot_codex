@@ -46,6 +46,15 @@ async fn main() -> Result<()> {
         "mybot-codex dry_run={} strategy={} target_qty={} poll={}ms",
         cfg.dry_run, cfg.strategy, cfg.target_qty, cfg.poll_ms
     );
+    if cfg.strategy == "btc_oracle_fallback" {
+        info!(
+            "btc_oracle_fallback tiers={} risk_fraction={} max_deploy={} daily_tp={}",
+            cfg.btc_oracle_tiers.len(),
+            cfg.btc_oracle_risk_fraction,
+            cfg.btc_oracle_max_deploy_usdc,
+            cfg.btc_oracle_daily_take_profit
+        );
+    }
 
     let cache = new_book_cache();
     let btc_price = new_btc_price_cache();
@@ -141,6 +150,10 @@ struct Config {
     btc_ladder_tail_max_spread: f64,
     btc_ladder_tail_exclude_ask_low: f64,
     btc_ladder_tail_exclude_ask_high: f64,
+    btc_oracle_tiers: Vec<BtcOracleTier>,
+    btc_oracle_risk_fraction: f64,
+    btc_oracle_max_deploy_usdc: f64,
+    btc_oracle_daily_take_profit: f64,
 }
 
 impl Config {
@@ -149,9 +162,11 @@ impl Config {
         let btc_price_symbol = env("BTC_PRICE_SYMBOL", "btc/usd");
         let btc_price_filters =
             normalize_btc_filters(&env("BTC_PRICE_FILTERS", ""), &btc_price_symbol);
+        let btc_oracle_profile = env("BTC_ORACLE_PROFILE", DEFAULT_BTC_ORACLE_PROFILE);
+        let btc_oracle_tiers = parse_btc_oracle_profile(&btc_oracle_profile)?;
         Ok(Self {
             dry_run: env_bool("DRY_RUN", true),
-            strategy: env("STRATEGY", "btc_distance_ladder"),
+            strategy: env("STRATEGY", "btc_oracle_fallback"),
             private_key: env_opt("PRIVATE_KEY"),
             deposit_wallet: env_opt("DEPOSIT_WALLET_ADDRESS"),
             signature_type: env_u64("SIGNATURE_TYPE", 3) as u8,
@@ -213,9 +228,20 @@ impl Config {
             btc_ladder_tail_max_spread: env_f64("BTC_LADDER_TAIL_MAX_SPREAD", 0.10),
             btc_ladder_tail_exclude_ask_low: env_f64("BTC_LADDER_TAIL_EXCLUDE_ASK_LOW", 0.85),
             btc_ladder_tail_exclude_ask_high: env_f64("BTC_LADDER_TAIL_EXCLUDE_ASK_HIGH", 0.90),
+            btc_oracle_tiers,
+            btc_oracle_risk_fraction: env_f64("BTC_ORACLE_RISK_FRACTION", 0.25),
+            btc_oracle_max_deploy_usdc: env_f64("BTC_ORACLE_MAX_DEPLOY_USDC", 270.0),
+            btc_oracle_daily_take_profit: env_f64("BTC_ORACLE_DAILY_TAKE_PROFIT", 800.0),
         })
     }
 }
+
+const DEFAULT_BTC_ORACLE_PROFILE: &str =
+    "label=e8_strong,sec=8,bps=5,ask=0.95,spread=none,frac=1;\
+label=e8_normal,sec=8,bps=0.5,ask=0.93,spread=none,frac=0.75;\
+label=e5_strong,sec=5,bps=1.5,ask=0.98,spread=0.10,frac=1;\
+label=e5_cheap,sec=5,bps=0.2,ask=0.85,spread=0.10,frac=0.75;\
+label=e3_final,sec=3,bps=0,ask=0.95,spread=none,frac=1";
 
 fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -254,6 +280,77 @@ fn env_f64(key: &str, default: f64) -> f64 {
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(default)
+}
+
+fn parse_optional_f64(raw: &str) -> Result<Option<f64>> {
+    let value = raw.trim();
+    if value.eq_ignore_ascii_case("none")
+        || value.eq_ignore_ascii_case("off")
+        || value.eq_ignore_ascii_case("null")
+        || value.is_empty()
+    {
+        return Ok(None);
+    }
+    Ok(Some(value.parse()?))
+}
+
+fn parse_btc_oracle_profile(raw: &str) -> Result<Vec<BtcOracleTier>> {
+    let mut tiers = Vec::new();
+    for (idx, chunk) in raw.split(';').enumerate() {
+        let chunk = chunk.trim();
+        if chunk.is_empty() {
+            continue;
+        }
+        let mut values: HashMap<String, String> = HashMap::new();
+        for part in chunk.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = part.split_once('=') else {
+                bail!("bad BTC_ORACLE_PROFILE part: {part}");
+            };
+            values.insert(key.trim().to_string(), value.trim().to_string());
+        }
+        let sec = values
+            .get("sec")
+            .ok_or_else(|| anyhow!("BTC_ORACLE_PROFILE tier {idx} missing sec"))?
+            .parse()?;
+        let min_abs_bps = values
+            .get("bps")
+            .ok_or_else(|| anyhow!("BTC_ORACLE_PROFILE tier {idx} missing bps"))?
+            .parse()?;
+        let max_ask = values
+            .get("ask")
+            .ok_or_else(|| anyhow!("BTC_ORACLE_PROFILE tier {idx} missing ask"))?
+            .parse()?;
+        let max_spread = values
+            .get("spread")
+            .map(|v| parse_optional_f64(v))
+            .transpose()?
+            .flatten();
+        let budget_frac = values
+            .get("frac")
+            .map(|v| v.parse())
+            .transpose()?
+            .unwrap_or(1.0);
+        let label = values
+            .get("label")
+            .cloned()
+            .unwrap_or_else(|| format!("e{sec}_bps{min_abs_bps}"));
+        tiers.push(BtcOracleTier {
+            label,
+            entry_sec: sec,
+            min_abs_bps,
+            max_ask,
+            max_spread,
+            budget_frac,
+        });
+    }
+    if tiers.is_empty() {
+        bail!("BTC_ORACLE_PROFILE is empty");
+    }
+    Ok(tiers)
 }
 
 fn normalize_btc_filters(raw: &str, symbol: &str) -> String {
@@ -767,6 +864,14 @@ impl State {
         self.trades.iter().filter_map(|t| t.pnl).sum()
     }
 
+    fn realized_pnl_for_utc_day(&self, day_id: i64) -> f64 {
+        self.trades
+            .iter()
+            .filter(|t| t.end_ts.div_euclid(86_400) == day_id)
+            .filter_map(|t| t.pnl)
+            .sum()
+    }
+
     fn has_trade(&self, slug: &str) -> bool {
         self.trades.iter().any(|t| t.market == slug)
     }
@@ -851,6 +956,16 @@ struct BtcLadderTier {
     exclude_ask_high: f64,
 }
 
+#[derive(Clone, Debug)]
+struct BtcOracleTier {
+    label: String,
+    entry_sec: i64,
+    min_abs_bps: f64,
+    max_ask: f64,
+    max_spread: Option<f64>,
+    budget_frac: f64,
+}
+
 struct TopQuote {
     ask: Option<f64>,
     ask_size: Option<f64>,
@@ -882,6 +997,7 @@ struct Bot {
     btc_start: HashMap<String, f64>,
     btc_start_wait_logged: HashSet<String>,
     btc_ladder_skip_logged: HashSet<String>,
+    btc_oracle_skip_logged: HashSet<String>,
     btc_locked: HashSet<String>,
     last_settlement_check: i64,
     last_tail_log_ts: i64,
@@ -910,6 +1026,7 @@ impl Bot {
             btc_start: HashMap::new(),
             btc_start_wait_logged: HashSet::new(),
             btc_ladder_skip_logged: HashSet::new(),
+            btc_oracle_skip_logged: HashSet::new(),
             btc_locked: HashSet::new(),
             last_settlement_check: 0,
             last_tail_log_ts: 0,
@@ -930,7 +1047,10 @@ impl Bot {
         if seconds_left <= 0 {
             return Ok(());
         }
-        if self.cfg.strategy == "btc_distance_ladder" || self.cfg.strategy == "btc_distance_tail" {
+        if self.cfg.strategy == "btc_distance_ladder"
+            || self.cfg.strategy == "btc_distance_tail"
+            || self.cfg.strategy == "btc_oracle_fallback"
+        {
             self.maybe_capture_btc_start(&market, seconds_left).await?;
         }
 
@@ -953,9 +1073,19 @@ impl Bot {
 
         if tail_window && now > self.last_tail_log_ts {
             self.last_tail_log_ts = now;
+            let tail_phase = if self.cfg.strategy == "btc_oracle_fallback" {
+                "btc_oracle_tail"
+            } else {
+                "t1_late_tail"
+            };
+            let missing_phase = if self.cfg.strategy == "btc_oracle_fallback" {
+                "btc_oracle_book_missing"
+            } else {
+                "t1_late_book_missing"
+            };
             if let (Some(up_ask), Some(dn_ask)) = (up_quote.ask, dn_quote.ask) {
                 self.signal(json!({
-                    "phase": "t1_late_tail",
+                    "phase": tail_phase,
                     "market": market.slug,
                     "seconds_left": seconds_left,
                     "up_ask": up_ask,
@@ -971,7 +1101,7 @@ impl Bot {
                 .await?;
             } else {
                 self.signal(json!({
-                    "phase": "t1_late_book_missing",
+                    "phase": missing_phase,
                     "market": market.slug,
                     "seconds_left": seconds_left,
                     "up_has_ask": up_quote.ask.is_some(),
@@ -984,7 +1114,15 @@ impl Bot {
             }
         }
 
-        if self.cfg.strategy == "btc_distance_ladder" {
+        if self.cfg.strategy == "btc_oracle_fallback" {
+            self.decide_btc_oracle_fallback(
+                &market,
+                &up_quote,
+                &dn_quote,
+                seconds_left,
+            )
+            .await
+        } else if self.cfg.strategy == "btc_distance_ladder" {
             self.decide_btc_distance_ladder(
                 &market,
                 &up_quote,
@@ -1241,6 +1379,360 @@ impl Bot {
             && ask <= tier.max_ask
             && spread <= tier.max_spread
             && !Self::btc_ladder_excluded_ask(tier, ask)
+    }
+
+    async fn decide_btc_oracle_fallback(
+        &mut self,
+        market: &Market,
+        up_quote: &TopQuote,
+        dn_quote: &TopQuote,
+        seconds_left: i64,
+    ) -> Result<()> {
+        self.maybe_capture_btc_start(market, seconds_left).await?;
+        if self.state.has_trade(&market.slug) {
+            self.btc_locked.insert(market.slug.clone());
+            return Ok(());
+        }
+        if self.btc_locked.contains(&market.slug) {
+            return Ok(());
+        }
+
+        let min_entry_sec = self
+            .cfg
+            .btc_oracle_tiers
+            .iter()
+            .map(|tier| tier.entry_sec)
+            .min()
+            .unwrap_or(0);
+        if seconds_left < min_entry_sec {
+            self.btc_locked.insert(market.slug.clone());
+            return Ok(());
+        }
+
+        let tiers: Vec<BtcOracleTier> = self
+            .cfg
+            .btc_oracle_tiers
+            .iter()
+            .filter(|tier| tier.entry_sec == seconds_left)
+            .cloned()
+            .collect();
+        if tiers.is_empty() {
+            return Ok(());
+        }
+
+        if self.cfg.btc_oracle_daily_take_profit > 0.0 {
+            let today = Utc::now().timestamp().div_euclid(86_400);
+            let day_pnl = self.state.realized_pnl_for_utc_day(today);
+            if day_pnl >= self.cfg.btc_oracle_daily_take_profit {
+                if self
+                    .btc_oracle_skip_logged
+                    .insert(format!("{}:daily_take_profit", market.slug))
+                {
+                    self.signal(json!({
+                        "phase": "btc_oracle_block",
+                        "reason": "daily_take_profit",
+                        "market": market.slug,
+                        "seconds_left": seconds_left,
+                        "day_pnl": day_pnl,
+                        "daily_take_profit": self.cfg.btc_oracle_daily_take_profit,
+                        "ts": Utc::now().timestamp(),
+                    }))
+                    .await?;
+                }
+                return Ok(());
+            }
+        }
+
+        let Some(tick) = self.latest_btc_tick().await else {
+            return self
+                .btc_distance_block(market, "btc_price_missing", seconds_left, json!({}))
+                .await;
+        };
+        let btc_age_ms = Self::btc_tick_age_ms(&tick);
+        if btc_age_ms > self.cfg.btc_price_max_age_ms {
+            return self
+                .btc_distance_block(
+                    market,
+                    "btc_price_stale",
+                    seconds_left,
+                    json!({
+                        "btc_price": tick.value,
+                        "btc_age_ms": btc_age_ms,
+                        "max_age_ms": self.cfg.btc_price_max_age_ms,
+                    }),
+                )
+                .await;
+        }
+        let Some(start_price) = self.btc_start.get(&market.slug).copied() else {
+            return self
+                .btc_distance_block(
+                    market,
+                    "btc_start_missing",
+                    seconds_left,
+                    json!({
+                        "btc_entry_price": tick.value,
+                        "start_capture_min_secs": self.cfg.btc_start_capture_min_secs,
+                    }),
+                )
+                .await;
+        };
+
+        let bps = (tick.value / start_price - 1.0) * 10000.0;
+        if !bps.is_finite() {
+            return self
+                .btc_distance_block(
+                    market,
+                    "btc_distance_bad",
+                    seconds_left,
+                    json!({
+                        "btc_start_price": start_price,
+                        "btc_entry_price": tick.value,
+                    }),
+                )
+                .await;
+        }
+        let abs_bps = bps.abs();
+        let (side, quote) = if bps > 0.0 {
+            ("Up", up_quote)
+        } else {
+            ("Down", dn_quote)
+        };
+
+        let mut selected: Option<(BtcOracleTier, f64, f64, f64, f64)> = None;
+        let mut reject_reasons: Vec<serde_json::Value> = Vec::new();
+        for tier in tiers {
+            if abs_bps < tier.min_abs_bps {
+                reject_reasons.push(json!({
+                    "tier": tier.label,
+                    "reason": "btc_too_close",
+                    "abs_bps": abs_bps,
+                    "min_abs_bps": tier.min_abs_bps,
+                }));
+                continue;
+            }
+            let Some(ask) = quote.ask else {
+                reject_reasons.push(json!({
+                    "tier": tier.label,
+                    "reason": "ask_missing",
+                    "side": side,
+                    "quote_source": quote.source,
+                }));
+                continue;
+            };
+            let Some(bid) = quote.bid else {
+                reject_reasons.push(json!({
+                    "tier": tier.label,
+                    "reason": "bid_missing",
+                    "side": side,
+                    "ask": ask,
+                    "quote_source": quote.source,
+                }));
+                continue;
+            };
+            if ask <= 0.0 || ask >= 1.0 || bid <= 0.0 || bid >= 1.0 {
+                reject_reasons.push(json!({
+                    "tier": tier.label,
+                    "reason": "bad_quote",
+                    "side": side,
+                    "ask": ask,
+                    "bid": bid,
+                }));
+                continue;
+            }
+            if ask > tier.max_ask {
+                reject_reasons.push(json!({
+                    "tier": tier.label,
+                    "reason": "ask_too_high",
+                    "side": side,
+                    "ask": ask,
+                    "max_ask": tier.max_ask,
+                }));
+                continue;
+            }
+            let spread = ask - bid;
+            if let Some(max_spread) = tier.max_spread {
+                if spread > max_spread {
+                    reject_reasons.push(json!({
+                        "tier": tier.label,
+                        "reason": "spread_too_wide",
+                        "side": side,
+                        "ask": ask,
+                        "bid": bid,
+                        "spread": spread,
+                        "max_spread": max_spread,
+                    }));
+                    continue;
+                }
+            }
+            selected = Some((tier, ask, bid, quote.ask_size.unwrap_or(0.0), spread));
+            break;
+        }
+
+        let Some((tier, ask, bid, ask_size, spread)) = selected else {
+            if self
+                .btc_oracle_skip_logged
+                .insert(format!("{}:{seconds_left}:no_tier", market.slug))
+            {
+                self.signal(json!({
+                    "phase": "btc_oracle_block",
+                    "reason": "no_eligible_tier",
+                    "market": market.slug,
+                    "seconds_left": seconds_left,
+                    "side": side,
+                    "btc_start_price": start_price,
+                    "btc_entry_price": tick.value,
+                    "btc_from_start_bps": bps,
+                    "quote_source": quote.source,
+                    "rejects": reject_reasons,
+                    "ts": Utc::now().timestamp(),
+                }))
+                .await?;
+            }
+            return Ok(());
+        };
+
+        let equity = (self.cfg.start_equity + self.state.realized_pnl()).max(0.0);
+        let mut max_deploy = f64::INFINITY;
+        if self.cfg.btc_oracle_risk_fraction > 0.0 {
+            max_deploy = max_deploy.min(equity * self.cfg.btc_oracle_risk_fraction);
+        }
+        if self.cfg.btc_oracle_max_deploy_usdc > 0.0 {
+            max_deploy = max_deploy.min(self.cfg.btc_oracle_max_deploy_usdc);
+        }
+        if !max_deploy.is_finite() {
+            max_deploy = self.cfg.target_qty * full_cost_per_share(ask);
+        }
+        let budget = max_deploy * tier.budget_frac.clamp(0.0, 1.0);
+        let cost_per_share = full_cost_per_share(ask);
+        let planned = self
+            .cfg
+            .target_qty
+            .min(ask_size.floor())
+            .min((budget / cost_per_share).floor());
+        let planned_cost = planned * cost_per_share;
+        if planned < 1.0 || planned_cost < 1.0 {
+            return self
+                .btc_distance_block(
+                    market,
+                    "btc_oracle_planned_order_too_small",
+                    seconds_left,
+                    json!({
+                        "tier": tier.label,
+                        "side": side,
+                        "ask": ask,
+                        "ask_size": ask_size,
+                        "equity": equity,
+                        "max_deploy": max_deploy,
+                        "budget_frac": tier.budget_frac,
+                        "budget": budget,
+                        "planned_shares": planned,
+                        "planned_cost": planned_cost,
+                    }),
+                )
+                .await;
+        }
+
+        self.btc_locked.insert(market.slug.clone());
+        self.signal(json!({
+            "phase": "intent",
+            "label": "btc_oracle_fallback_entry",
+            "tier": tier.label,
+            "market": market.slug,
+            "direction": side,
+            "price": ask,
+            "bid": bid,
+            "spread": spread,
+            "shares": planned,
+            "ask_size": ask_size,
+            "equity": equity,
+            "max_deploy": max_deploy,
+            "budget_frac": tier.budget_frac,
+            "planned_cost": planned_cost,
+            "btc_start_price": start_price,
+            "btc_entry_price": tick.value,
+            "btc_from_start_bps": bps,
+            "btc_price_age_ms": btc_age_ms,
+            "seconds_left": seconds_left,
+            "quote_source": quote.source,
+            "mode": "dry_run_fak",
+            "ts": Utc::now().timestamp(),
+        }))
+        .await?;
+
+        let token = market
+            .token_for(side)
+            .ok_or_else(|| anyhow!("missing token for side {side}"))?;
+        let fill = self.executor.buy_fak(token, ask, planned, Some(ask)).await?;
+        self.signal(json!({
+            "phase": "submit",
+            "label": "btc_oracle_fallback_entry",
+            "tier": tier.label,
+            "market": market.slug,
+            "direction": side,
+            "order_id": fill.order_id,
+            "status": fill.status,
+            "success": fill.success,
+            "simulated": fill.simulated,
+            "filled_price": fill.filled_price,
+            "filled_shares": fill.filled_shares,
+            "ts": Utc::now().timestamp(),
+        }))
+        .await?;
+
+        if !fill.success || fill.filled_shares <= 0.0 {
+            warn!("BTC oracle FAK produced no fill for {}", market.slug);
+            return Ok(());
+        }
+
+        let filled_price = fill.filled_price;
+        let filled_shares = fill.filled_shares;
+        let filled_cost_per_share = full_cost_per_share(filled_price);
+        let filled_cost = filled_shares * filled_cost_per_share;
+        self.state.trades.push(Trade {
+            market: market.slug.clone(),
+            end_ts: market.end_ts,
+            strategy: Some("btc_oracle_fallback".to_string()),
+            tier: Some(tier.label.clone()),
+            side: side.to_string(),
+            price: filled_price,
+            shares: filled_shares,
+            cost: filled_cost,
+            ts: Utc::now().timestamp(),
+            btc_start_price: Some(start_price),
+            btc_entry_price: Some(tick.value),
+            btc_from_start_bps: Some(bps),
+            winner: None,
+            pnl: None,
+        });
+        self.state.save(&self.cfg.state_file).await?;
+        self.signal(json!({
+            "phase": "btc_oracle_fallback_entry",
+            "market": market.slug,
+            "tier": tier.label,
+            "direction": side,
+            "price": filled_price,
+            "shares": filled_shares,
+            "full_cost": filled_cost_per_share,
+            "total_cost": filled_cost,
+            "btc_start_price": start_price,
+            "btc_entry_price": tick.value,
+            "btc_from_start_bps": bps,
+            "dry_run": self.cfg.dry_run,
+            "ts": Utc::now().timestamp(),
+        }))
+        .await?;
+        info!(
+            "BTC oracle {} entry {} {} @ {:.3} x {:.0} cost {:.2} bps={:.4} dry_run={}",
+            tier.label,
+            market.slug,
+            side,
+            filled_price,
+            filled_shares,
+            filled_cost,
+            bps,
+            self.cfg.dry_run
+        );
+        Ok(())
     }
 
     async fn decide_btc_distance_ladder(

@@ -146,6 +146,8 @@ def build_rows(trades: list[dict[str, Any]]) -> tuple[list[list[str]], dict[str,
                 phase = f"距离-{tier}" if tier else "距离分层"
             elif strategy == "btc_distance_tail":
                 phase = "BTC距离"
+            elif strategy == "btc_oracle_fallback":
+                phase = f"BTC涨跌-{tier}" if tier else "BTC涨跌"
             else:
                 phase = "T1尾盘"
             rows.append(

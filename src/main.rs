@@ -881,6 +881,7 @@ struct Bot {
     t1: HashMap<String, T1State>,
     btc_start: HashMap<String, f64>,
     btc_start_wait_logged: HashSet<String>,
+    btc_ladder_skip_logged: HashSet<String>,
     btc_locked: HashSet<String>,
     last_settlement_check: i64,
     last_tail_log_ts: i64,
@@ -908,6 +909,7 @@ impl Bot {
             t1: HashMap::new(),
             btc_start: HashMap::new(),
             btc_start_wait_logged: HashSet::new(),
+            btc_ladder_skip_logged: HashSet::new(),
             btc_locked: HashSet::new(),
             last_settlement_check: 0,
             last_tail_log_ts: 0,
@@ -1414,25 +1416,28 @@ impl Bot {
             }
         }
         let Some(tier) = selected else {
+            if seconds_left <= self.cfg.btc_ladder_mid_secs
+                && self.btc_ladder_skip_logged.insert(market.slug.clone())
+            {
+                self.btc_distance_block(
+                    market,
+                    "ladder_no_eligible_tier",
+                    seconds_left,
+                    json!({
+                        "side": side,
+                        "ask": ask,
+                        "bid": bid,
+                        "spread": spread,
+                        "btc_from_start_bps": bps,
+                        "btc_distance_score": score,
+                        "current_cost": pos.total_cost,
+                        "max_deploy": max_deploy,
+                    }),
+                )
+                .await?;
+            }
             if seconds_left <= self.cfg.btc_ladder_tail_secs {
                 self.btc_locked.insert(market.slug.clone());
-                return self
-                    .btc_distance_block(
-                        market,
-                        "ladder_no_eligible_tier",
-                        seconds_left,
-                        json!({
-                            "side": side,
-                            "ask": ask,
-                            "bid": bid,
-                            "spread": spread,
-                            "btc_from_start_bps": bps,
-                            "btc_distance_score": score,
-                            "current_cost": pos.total_cost,
-                            "max_deploy": max_deploy,
-                        }),
-                    )
-                    .await;
             }
             return Ok(());
         };

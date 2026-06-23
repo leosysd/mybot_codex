@@ -179,7 +179,7 @@ impl Config {
             target_qty: env_f64("T1_LATE_TARGET_QTY", 5000.0),
             start_equity: env_f64("T1_LATE_START_EQUITY", 300.0),
             risk_fraction: env_f64("T1_LATE_RISK_FRACTION", 0.2),
-            max_deploy_usdc: env_f64("T1_LATE_MAX_DEPLOY_USDC", 500.0),
+            max_deploy_usdc: env_f64("T1_LATE_MAX_DEPLOY_USDC", 255.0),
             rest_fallback_timeout_ms: env_u64("REST_FALLBACK_TIMEOUT_MS", 700),
             btc_tail_max_secs: env_i64("BTC_DISTANCE_TAIL_MAX_SECS", 2),
             btc_start_capture_min_secs: env_i64("BTC_DISTANCE_START_CAPTURE_MIN_SECS", 295),
@@ -195,7 +195,7 @@ impl Config {
             btc_ladder_early_max_ask: env_f64("BTC_LADDER_EARLY_MAX_ASK", 0.95),
             btc_ladder_early_max_spread: env_f64("BTC_LADDER_EARLY_MAX_SPREAD", 0.10),
             btc_ladder_mid_secs: env_i64("BTC_LADDER_MID_SECS", 5),
-            btc_ladder_mid_budget_frac: env_f64("BTC_LADDER_MID_BUDGET_FRAC", 0.40),
+            btc_ladder_mid_budget_frac: env_f64("BTC_LADDER_MID_BUDGET_FRAC", 1.0),
             btc_ladder_mid_min_abs_bps: env_f64("BTC_LADDER_MID_MIN_ABS_BPS", 1.0),
             btc_ladder_mid_min_score: env_f64("BTC_LADDER_MID_MIN_SCORE", 0.5),
             btc_ladder_mid_max_ask: env_f64("BTC_LADDER_MID_MAX_ASK", 0.99),
@@ -206,7 +206,7 @@ impl Config {
             btc_ladder_tail_budget_frac: env_f64("BTC_LADDER_TAIL_BUDGET_FRAC", 1.0),
             btc_ladder_tail_min_abs_bps: env_f64("BTC_LADDER_TAIL_MIN_ABS_BPS", 0.0),
             btc_ladder_tail_min_score: env_f64("BTC_LADDER_TAIL_MIN_SCORE", 0.0),
-            btc_ladder_tail_max_ask: env_f64("BTC_LADDER_TAIL_MAX_ASK", 0.98),
+            btc_ladder_tail_max_ask: env_f64("BTC_LADDER_TAIL_MAX_ASK", 0.01),
             btc_ladder_tail_max_spread: env_f64("BTC_LADDER_TAIL_MAX_SPREAD", 0.10),
             btc_ladder_tail_exclude_ask_low: env_f64("BTC_LADDER_TAIL_EXCLUDE_ASK_LOW", 0.85),
             btc_ladder_tail_exclude_ask_high: env_f64("BTC_LADDER_TAIL_EXCLUDE_ASK_HIGH", 0.90),
@@ -367,12 +367,16 @@ impl BtcPriceWs {
             }]
         });
         write.send(Message::Text(sub.to_string().into())).await?;
+        info!(
+            "btc price ws subscribed topic={} type={} filters={}",
+            self.topic, self.msg_type, self.filters
+        );
         let mut ping = tokio::time::interval(tokio::time::Duration::from_secs(5));
 
         loop {
             tokio::select! {
                 _ = ping.tick() => {
-                    let _ = write.send(Message::Text("PING".into())).await;
+                    let _ = write.send(Message::Ping(Vec::new().into())).await;
                 }
                 msg = read.next() => {
                     let Some(msg) = msg else { return Ok(()); };

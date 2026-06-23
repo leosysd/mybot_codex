@@ -8,12 +8,12 @@
 
 ### btc_oracle_fallback
 
-当前默认策略是 Candidate B：BTC 涨跌幅和 ask 盈亏比绑定的 taker fallback 策略。
+当前默认策略是 Candidate C：在 Candidate B 的 BTC 涨跌幅和 ask 盈亏比分层 fallback 前，增加一层 T-15 短动量提前入口。
 
 1. 通过 Polymarket RTDS 订阅 `btc/usd` 实时价格。
 2. 新盘口开始时记录 BTC 开盘附近价格，作为本盘基准价。
 3. 当前 BTC 高于基准价只考虑 Up，低于或等于基准价只考虑 Down。
-4. 只在精确 T-8 / T-5 / T-3 三个秒点检查，不使用最后 2 秒。
+4. T-15 短动量入口：BTC 偏离 `>=5 bps`，最近 3 秒同向，最近 5 秒同向 `>=0.5 bps`，ask `<=0.98`，spread `<=0.10`。
 5. T-8 强信号：BTC 偏离 `>=5 bps`，ask `<=0.95`，可用 100% 当盘预算。
 6. T-8 普通信号：BTC 偏离 `>=0.5 bps`，ask `<=0.93`，可用 75% 当盘预算。
 7. T-5 强 fallback：BTC 偏离 `>=1.5 bps`，ask `<=0.98`，spread `<=0.10`，可用 100% 当盘预算。
@@ -21,18 +21,18 @@
 9. T-3 最后 fallback：ask `<=0.95`，可用 100% 当盘预算；不吃 0.97~0.99 高价尾盘。
 10. 同一盘口最多下一笔 FAK，默认 `DRY_RUN=1` 只模拟。
 
-当前 Candidate B 回测口径:
+当前 Candidate C 回测口径:
 
 ```text
-300u -> 10027.39u
-平均每天 +313.79u
-最差日 -282.14u
+300u -> 10616.54u
+平均每天 +332.79u
+最差日 -259.56u
 最大回撤 866.25u
 最大单笔成本 269.97u
-2102 笔，错 421 笔
+2171 笔，错 420 笔
 ```
 
-这个结果来自 `telonex-qty295-single-month/scripts/roll_btc_oracle_fallback.py`，使用一个月 live-state 盘口和 Telonex BTC 价格特征。它达到了历史 taker 回测目标，但仍只能先跑 VPS dry-run；重点验证 T-8/T-5/T-3 的真实 FAK 成交率、盘口延迟和 ask 消失率。
+这个结果来自 `telonex-qty295-single-month/scripts/roll_btc_oracle_fallback.py` 和 `roll_btc_oracle_profile_walkforward.py`，使用一个月 live-state 盘口和 Telonex BTC 价格特征。它达到了历史 taker 回测目标，但仍只能先跑 VPS dry-run；重点验证 T-15/T-8/T-5/T-3 的真实 FAK 成交率、盘口延迟和 ask 消失率。
 
 ### btc_distance_ladder
 
@@ -221,13 +221,13 @@ jytd
 盘口时间 | 秒 | 方向 | 价格 | 份额 | 成本 | 阶段 | 结果 | 盈亏
 ```
 
-看 Candidate B 诊断:
+看 Candidate C 诊断:
 
 ```bash
 jydiag
 ```
 
-`jydiag` 会统计最近 24 小时信号：phase 计数、Candidate B 的 block 原因、tier reject、缺 ask 秒点、intent/submit/entry 数量、BTC tick age，以及按层级 PnL。
+`jydiag` 会统计最近 24 小时信号：phase 计数、Candidate C 的 block 原因、tier reject、缺 ask 秒点、intent/submit/entry 数量、BTC tick age，以及按层级 PnL。
 默认只统计最近一次 `service_start` 之后的信号；需要包含旧启动周期时加 `--all-starts`。
 `jytd` 交易统计表会显示每笔 `BTC涨跌bp`，也就是入场时 BTC 相对本盘开盘价的涨跌幅；正数买 Up，负数买 Down。
 `jydiag` 会额外汇总各 tier 的 BTC 入场涨跌 bp，方便检查策略是不是真的在按 BTC 偏离强弱下单。
@@ -342,15 +342,15 @@ dry-run 资金模型。
 - `T1_LATE_MAX_DEPLOY_USDC=0`: 不设置固定单盘口上限。
 
 ```text
-BTC_ORACLE_PROFILE=label=e8_strong,sec=8,bps=5,ask=0.95,spread=none,frac=1;...
+BTC_ORACLE_PROFILE=label=t15_momo,sec=15,bps=5,ask=0.98,spread=0.10,frac=1,ret3=0,ret5=0.5;...
 BTC_ORACLE_RISK_FRACTION=0.25
 BTC_ORACLE_MAX_DEPLOY_USDC=270
 BTC_ORACLE_DAILY_TAKE_PROFIT=800
 ```
 
-Candidate B 参数。
+Candidate C 参数。
 
-- `BTC_ORACLE_PROFILE`: 五层 fallback 配置；机器人按顺序检查同一秒的 tier，第一档满足就下单。
+- `BTC_ORACLE_PROFILE`: 六层 fallback 配置；机器人按顺序检查同一秒的 tier，第一档满足就下单。
 - `label`: `jytd` 和信号日志里显示的阶段名。
 - `sec`: 精确剩余秒数，只在这个秒点检查。
 - `bps`: BTC 相对本盘基准价的最小绝对偏离，单位 bps。
@@ -362,7 +362,7 @@ Candidate B 参数。
 - `BTC_ORACLE_MAX_DEPLOY_USDC=270`: 每个盘口硬上限 270u。
 - `BTC_ORACLE_DAILY_TAKE_PROFIT=800`: 当天已结算 dry-run PnL 到 800u 后停止当天新开仓。
 
-Candidate C 回测候选示例，在 Candidate B 前增加 T-15 短动量提前层，尚未作为默认配置：
+Candidate C 默认 profile，在 Candidate B 前增加 T-15 短动量提前层：
 
 ```text
 BTC_ORACLE_PROFILE=label=t15_momo,sec=15,bps=5,ask=0.98,spread=0.10,frac=1,ret3=0,ret5=0.5;label=e8_strong,sec=8,bps=5,ask=0.95,spread=none,frac=1;label=e8_normal,sec=8,bps=0.5,ask=0.93,spread=none,frac=0.75;label=e5_strong,sec=5,bps=1.5,ask=0.98,spread=0.10,frac=1;label=e5_cheap,sec=5,bps=0.2,ask=0.85,spread=0.10,frac=0.75;label=e3_final,sec=3,bps=0,ask=0.95,spread=none,frac=1
@@ -447,7 +447,7 @@ src/main.rs
 - `OrderBook`: 保存 Up/Down 的 asks/bids。
 - `State` / `Trade`: 保存 dry-run 交易记录和结算结果。
 - `Bot::run_once`: 每轮主循环，找市场、取盘口、检查结算、调用策略。
-- `Bot::decide_btc_oracle_fallback`: Candidate B，BTC 涨跌幅和 ask 盈亏比分层 fallback。
+- `Bot::decide_btc_oracle_fallback`: Candidate C，BTC 涨跌幅、短动量和 ask 盈亏比分层 fallback。
 - `Bot::decide_btc_distance_ladder`: BTC 距离分层策略核心。
 - `Bot::decide_btc_distance_tail`: BTC 距离尾盘策略核心。
 - `Bot::decide_t1_late`: 旧 T-10/T-8/T-1 策略核心。
@@ -481,7 +481,7 @@ scripts/jytd.py
 scripts/jydiag.py
 ```
 
-Candidate B 诊断命令。部署后安装为 `/usr/local/bin/jydiag`。默认读取 `/opt/mybot-codex/.env`、state 和 signals，输出最近 24 小时触发/拦截/缺盘口/延迟统计。
+Candidate C 诊断命令。部署后安装为 `/usr/local/bin/jydiag`。默认读取 `/opt/mybot-codex/.env`、state 和 signals，输出最近 24 小时触发/拦截/缺盘口/延迟统计。
 
 ```text
 Cargo.toml / Cargo.lock
@@ -503,10 +503,10 @@ data/t1_late_signals.jsonl
 
 - `market`: 发现新的 5 分钟盘口。
 - `btc_distance_start`: 记录本盘 BTC 基准价。
-- `btc_oracle_tail`: Candidate B 尾盘盘口快照。
-- `btc_oracle_book_missing`: Candidate B 尾盘缺少 ask，无法判断。
-- `btc_oracle_block`: Candidate B 被条件拦截，不入场。
-- `btc_oracle_fallback_entry`: Candidate B dry-run 成交。
+- `btc_oracle_tail`: Candidate C 尾盘盘口快照。
+- `btc_oracle_book_missing`: Candidate C 尾盘缺少 ask，无法判断。
+- `btc_oracle_block`: Candidate C 被条件拦截，不入场。
+- `btc_oracle_fallback_entry`: Candidate C dry-run 成交。
 - `btc_distance_block`: BTC 距离策略被条件拦截，不入场。
 - `btc_distance_ladder_entry`: BTC 距离分层策略 dry-run 成交。
 - `btc_distance_tail_entry`: BTC 距离策略 dry-run 成交。
@@ -575,6 +575,6 @@ jydiag --hours 0 --all-starts
 3. `t1_late_signals.jsonl` 里 `btc_distance_start`、`btc_oracle_fallback_entry`、`intent`、`submit`、`settled` 字段完整。
 4. 现场盘口和历史 Telonex 字段口径一致。
 5. 明确接受 `BTC_ORACLE_RISK_FRACTION=0.25` 和 `BTC_ORACLE_MAX_DEPLOY_USDC=270` 的风险边界。
-6. 统计 T-8/T-5/T-3 的 FAK 成交率、无 ask 率、REST fallback 次数和 RTDS BTC 延迟。
+6. 统计 T-15/T-8/T-5/T-3 的 FAK 成交率、无 ask 率、REST fallback 次数和 RTDS BTC 延迟。
 
-历史回测不是未来收益保证。当前默认 Candidate B 回测仍然存在约 -270u 的单盘口亏损和约 866.25u 的最大回撤，必须先 dry-run 验证 T-8/T-5/T-3 真实可成交性、RTDS 延迟和时间戳对齐。
+历史回测不是未来收益保证。当前默认 Candidate C 回测仍然存在约 -270u 的单盘口亏损和约 866.25u 的最大回撤，必须先 dry-run 验证 T-15/T-8/T-5/T-3 真实可成交性、RTDS 延迟和时间戳对齐。

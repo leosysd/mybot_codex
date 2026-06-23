@@ -47,7 +47,7 @@ T1_LATE_TARGET_QTY=5000
 T1_LATE_START_EQUITY=300
 T1_LATE_RISK_FRACTION=0.2
 T1_LATE_MAX_DEPLOY_USDC=255
-BTC_ORACLE_PROFILE=label=e8_strong,sec=8,bps=5,ask=0.95,spread=none,frac=1;label=e8_normal,sec=8,bps=0.5,ask=0.93,spread=none,frac=0.75;label=e5_strong,sec=5,bps=1.5,ask=0.98,spread=0.10,frac=1;label=e5_cheap,sec=5,bps=0.2,ask=0.85,spread=0.10,frac=0.75;label=e3_final,sec=3,bps=0,ask=0.95,spread=none,frac=1
+BTC_ORACLE_PROFILE=label=t15_momo,sec=15,bps=5,ask=0.98,spread=0.10,frac=1,ret3=0,ret5=0.5;label=e8_strong,sec=8,bps=5,ask=0.95,spread=none,frac=1;label=e8_normal,sec=8,bps=0.5,ask=0.93,spread=none,frac=0.75;label=e5_strong,sec=5,bps=1.5,ask=0.98,spread=0.10,frac=1;label=e5_cheap,sec=5,bps=0.2,ask=0.85,spread=0.10,frac=0.75;label=e3_final,sec=3,bps=0,ask=0.95,spread=none,frac=1
 BTC_ORACLE_RISK_FRACTION=0.25
 BTC_ORACLE_MAX_DEPLOY_USDC=270
 BTC_ORACLE_DAILY_TAKE_PROFIT=800
@@ -107,7 +107,7 @@ ensure_env BTC_DISTANCE_MAX_SPREAD 0.10
 ensure_env BTC_DISTANCE_EXCLUDE_ASK_LOW 0.85
 ensure_env BTC_DISTANCE_EXCLUDE_ASK_HIGH 0.90
 ensure_env BTC_DISTANCE_MIN_ABS_BPS 0
-ensure_env BTC_ORACLE_PROFILE 'label=e8_strong,sec=8,bps=5,ask=0.95,spread=none,frac=1;label=e8_normal,sec=8,bps=0.5,ask=0.93,spread=none,frac=0.75;label=e5_strong,sec=5,bps=1.5,ask=0.98,spread=0.10,frac=1;label=e5_cheap,sec=5,bps=0.2,ask=0.85,spread=0.10,frac=0.75;label=e3_final,sec=3,bps=0,ask=0.95,spread=none,frac=1'
+ensure_env BTC_ORACLE_PROFILE 'label=t15_momo,sec=15,bps=5,ask=0.98,spread=0.10,frac=1,ret3=0,ret5=0.5;label=e8_strong,sec=8,bps=5,ask=0.95,spread=none,frac=1;label=e8_normal,sec=8,bps=0.5,ask=0.93,spread=none,frac=0.75;label=e5_strong,sec=5,bps=1.5,ask=0.98,spread=0.10,frac=1;label=e5_cheap,sec=5,bps=0.2,ask=0.85,spread=0.10,frac=0.75;label=e3_final,sec=3,bps=0,ask=0.95,spread=none,frac=1'
 ensure_env BTC_ORACLE_RISK_FRACTION 0.25
 ensure_env BTC_ORACLE_MAX_DEPLOY_USDC 270
 ensure_env BTC_ORACLE_DAILY_TAKE_PROFIT 800

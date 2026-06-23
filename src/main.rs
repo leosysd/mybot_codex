@@ -244,7 +244,9 @@ impl Config {
     }
 }
 
-const DEFAULT_BTC_ORACLE_PROFILE: &str = "label=e8_strong,sec=8,bps=5,ask=0.95,spread=none,frac=1;\
+const DEFAULT_BTC_ORACLE_PROFILE: &str =
+    "label=t15_momo,sec=15,bps=5,ask=0.98,spread=0.10,frac=1,ret3=0,ret5=0.5;\
+label=e8_strong,sec=8,bps=5,ask=0.95,spread=none,frac=1;\
 label=e8_normal,sec=8,bps=0.5,ask=0.93,spread=none,frac=0.75;\
 label=e5_strong,sec=5,bps=1.5,ask=0.98,spread=0.10,frac=1;\
 label=e5_cheap,sec=5,bps=0.2,ask=0.85,spread=0.10,frac=0.75;\

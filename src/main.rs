@@ -895,6 +895,9 @@ impl Bot {
         if seconds_left <= 0 {
             return Ok(());
         }
+        if self.cfg.strategy == "btc_distance_ladder" || self.cfg.strategy == "btc_distance_tail" {
+            self.maybe_capture_btc_start(&market, seconds_left).await?;
+        }
 
         let up_idx = market
             .outcomes

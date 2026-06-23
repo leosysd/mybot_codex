@@ -402,6 +402,12 @@ impl BtcPriceWs {
                 );
             }
             let mut cache = self.cache.write().await;
+            if cache.is_none() {
+                info!(
+                    "btc price first tick {} value {:.2} ts_ms={}",
+                    self.symbol, tick.value, tick.timestamp_ms
+                );
+            }
             *cache = Some(tick);
         }
     }

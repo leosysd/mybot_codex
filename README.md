@@ -8,29 +8,30 @@
 
 ### btc_distance_ladder
 
-当前默认策略是 BTC 距离分层 taker 策略:
+当前默认策略是 BTC 距离分层 taker 策略，默认不再死磕最后 2 秒:
 
 1. 通过 Polymarket RTDS 订阅 `btc/usd` 实时价格。
 2. 新盘口开始时记录 BTC 开盘附近价格，作为本盘基准价。
 3. 当前 BTC 价格高于本盘基准价就只考虑 Up，低于基准价就只考虑 Down。
 4. T-60 开始允许 early 层，但要求 BTC 距离极端，只能补到单盘口风险上限的 5%。
-5. T-5 开始允许 mid 层，要求 BTC 距离和强度仍达标，最多补到单盘口风险上限的 40%。
-6. T-2/T-1 允许 tail 层，最多补到单盘口风险上限的 100%。
+5. T-5 开始允许 mid 层，要求 BTC 距离和强度仍达标，最多补到单盘口风险上限的 100%。
+6. Tail 层默认关闭，`BTC_LADDER_TAIL_MAX_ASK=0.01`，只在专门测试 T-2/T-1 时再打开。
 7. 同一盘口不追着换边；如果已持有一边，BTC 方向反转时不再加仓。
 8. 同一时刻只补到当前最高允许层，不会把 early/mid/tail 在同一顶档重复吃三次。
 9. 所有下单都是 FAK，默认 `DRY_RUN=1` 只模拟。
 
-当前一个月回测最佳口径:
+当前默认 no-tail cap255 口径:
 
 ```text
-300u -> 20133.67u
-平均每天 +639.80u
-最差日 -282.09u
-最大回撤 1107.88u
-2834 盘，错 193 盘
+300u -> 10037.07u
+平均每天 +314.10u
+最差日 -308.87u
+最大回撤 844.59u
+最大单盘口成本 255.00u
+2181 盘，错 116 盘
 ```
 
-这个结果来自 `telonex-qty295-single-month/scripts/roll_btc_distance_ladder_taker.py`，使用一个月 live-state 盘口和 Telonex BTC 价格特征。
+这个结果来自 `telonex-qty295-single-month/scripts/roll_btc_distance_ladder_taker.py`，使用一个月 live-state 盘口和 Telonex BTC 价格特征。旧的 T-2/T-1 tail 补仓版本回测更高，但默认不采用，因为实盘模拟更需要验证 T-5 可成交性和风险边界。
 
 ### btc_distance_tail
 
@@ -291,14 +292,14 @@ T1_LATE_TARGET_QTY=5000
 ```text
 T1_LATE_START_EQUITY=300
 T1_LATE_RISK_FRACTION=0.2
-T1_LATE_MAX_DEPLOY_USDC=500
+T1_LATE_MAX_DEPLOY_USDC=255
 ```
 
 dry-run 资金模型。
 
 - `T1_LATE_START_EQUITY=300`: 模拟初始本金 300u。
 - `T1_LATE_RISK_FRACTION=0.2`: 每盘最多用当前模拟权益的 20%。
-- `T1_LATE_MAX_DEPLOY_USDC=500`: 每个盘口最多部署 500u。
+- `T1_LATE_MAX_DEPLOY_USDC=255`: 每个盘口最多部署 255u。
 - `T1_LATE_MAX_DEPLOY_USDC=0`: 不设置固定单盘口上限。
 
 ```text
@@ -333,7 +334,7 @@ BTC_LADDER_EARLY_MAX_SPREAD=0.10
 
 ```text
 BTC_LADDER_MID_SECS=5
-BTC_LADDER_MID_BUDGET_FRAC=0.40
+BTC_LADDER_MID_BUDGET_FRAC=1.0
 BTC_LADDER_MID_MIN_ABS_BPS=1
 BTC_LADDER_MID_MIN_SCORE=0.5
 BTC_LADDER_MID_MAX_ASK=0.99
@@ -342,20 +343,20 @@ BTC_LADDER_MID_EXCLUDE_ASK_LOW=0.85
 BTC_LADDER_MID_EXCLUDE_ASK_HIGH=0.90
 ```
 
-分层策略 mid 层。T-5 开始看，最多补到单盘口风险上限的 40%，并跳过 `0.85~0.90` 的坏价格带。
+分层策略 mid 层。T-5 开始看，最多补到单盘口风险上限的 100%，并跳过 `0.85~0.90` 的坏价格带。
 
 ```text
 BTC_LADDER_TAIL_SECS=2
 BTC_LADDER_TAIL_BUDGET_FRAC=1.0
 BTC_LADDER_TAIL_MIN_ABS_BPS=0
 BTC_LADDER_TAIL_MIN_SCORE=0
-BTC_LADDER_TAIL_MAX_ASK=0.98
+BTC_LADDER_TAIL_MAX_ASK=0.01
 BTC_LADDER_TAIL_MAX_SPREAD=0.10
 BTC_LADDER_TAIL_EXCLUDE_ASK_LOW=0.85
 BTC_LADDER_TAIL_EXCLUDE_ASK_HIGH=0.90
 ```
 
-分层策略 tail 层。T-2/T-1 才允许补到 100%，但默认不吃 `0.99` 的极贵 ask。
+分层策略 tail 层。默认 `BTC_LADDER_TAIL_MAX_ASK=0.01`，实际等于关闭 T-2/T-1 补仓；只有专门测试尾盘时才把它调高。
 
 ```text
 REST_FALLBACK_TIMEOUT_MS=700
@@ -476,6 +477,6 @@ jytd
 2. `jytd` 能正常显示模拟交易和结算。
 3. `t1_late_signals.jsonl` 里 `btc_distance_start`、`btc_distance_ladder_entry`、`intent`、`submit`、`settled` 字段完整。
 4. 现场盘口和历史 Telonex 字段口径一致。
-5. 明确接受 `T1_LATE_RISK_FRACTION=0.2` 和 `T1_LATE_MAX_DEPLOY_USDC=500` 的风险边界。
+5. 明确接受 `T1_LATE_RISK_FRACTION=0.2` 和 `T1_LATE_MAX_DEPLOY_USDC=255` 的风险边界。
 
-历史回测不是未来收益保证。当前最佳回测仍然存在约 -500u 的单盘口亏损和约 1107.88u 的最大回撤，必须先 dry-run 验证 T-5/T-2/T-1 真实可成交性、RTDS 延迟和时间戳对齐。
+历史回测不是未来收益保证。当前默认 no-tail cap255 回测仍然存在约 -255u 的单盘口亏损和约 844.59u 的最大回撤，必须先 dry-run 验证 T-5 真实可成交性、RTDS 延迟和时间戳对齐。

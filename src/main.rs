@@ -1786,7 +1786,7 @@ impl Bot {
             .ok_or_else(|| anyhow!("missing token for side {side}"))?;
         let fill = self
             .executor
-            .buy_fak(token, ask, planned, Some(ask))
+            .buy_fak(token, ask, planned, Some(0.99))
             .await?;
         self.signal(json!({
             "phase": "submit",

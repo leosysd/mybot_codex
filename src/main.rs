@@ -436,6 +436,17 @@ impl OrderBook {
     fn best_bid(&self) -> Option<f64> {
         self.bids.first().map(|(p, _)| *p)
     }
+
+    fn depth_json(&self, levels: usize) -> serde_json::Value {
+        json!({
+            "asks": self.asks.iter().take(levels).map(|(price, size)| {
+                json!({ "price": price, "size": size })
+            }).collect::<Vec<_>>(),
+            "bids": self.bids.iter().take(levels).map(|(price, size)| {
+                json!({ "price": price, "size": size })
+            }).collect::<Vec<_>>(),
+        })
+    }
 }
 
 type BookCache = Arc<RwLock<HashMap<String, OrderBook>>>;
@@ -1062,6 +1073,10 @@ impl TopQuote {
     }
 }
 
+fn should_log_oracle_book_depth(seconds_left: i64) -> bool {
+    matches!(seconds_left, 15 | 8 | 5 | 3 | 2 | 1)
+}
+
 struct Bot {
     cfg: Config,
     client: ClobClient,
@@ -1190,6 +1205,28 @@ impl Bot {
                 }))
                 .await?;
             }
+            if self.cfg.strategy == "btc_oracle_fallback"
+                && should_log_oracle_book_depth(seconds_left)
+            {
+                let up_depth = self.book_depth_snapshot(up_token, 5).await;
+                let dn_depth = self.book_depth_snapshot(dn_token, 5).await;
+                self.signal(json!({
+                    "phase": "btc_oracle_book5",
+                    "market": market.slug,
+                    "seconds_left": seconds_left,
+                    "levels": 5,
+                    "up_token": up_token,
+                    "dn_token": dn_token,
+                    "up_depth": up_depth,
+                    "dn_depth": dn_depth,
+                    "up_has_depth": up_depth.is_some(),
+                    "dn_has_depth": dn_depth.is_some(),
+                    "up_source": up_quote.source,
+                    "dn_source": dn_quote.source,
+                    "ts": now,
+                }))
+                .await?;
+            }
         }
 
         if self.cfg.strategy == "btc_oracle_fallback" {
@@ -1295,6 +1332,15 @@ impl Bot {
             cache.insert(token_id.to_string(), book);
         }
         quote
+    }
+
+    async fn book_depth_snapshot(
+        &self,
+        token_id: &str,
+        levels: usize,
+    ) -> Option<serde_json::Value> {
+        let cache = self.cache.read().await;
+        cache.get(token_id).map(|book| book.depth_json(levels))
     }
 
     async fn latest_btc_tick(&self) -> Option<BtcTick> {

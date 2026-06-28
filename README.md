@@ -507,6 +507,7 @@ data/t1_late_signals.jsonl
 - `market`: 发现新的 5 分钟盘口。
 - `btc_distance_start`: 记录本盘 BTC 基准价。
 - `btc_oracle_tail`: Candidate C 尾盘盘口快照。
+- `btc_oracle_book5`: Candidate C 关键秒盘口深度快照，记录 Up/Down 前五档 ask/bid。
 - `btc_oracle_book_missing`: Candidate C 尾盘缺少 ask，无法判断。
 - `btc_oracle_block`: Candidate C 被条件拦截，不入场。
 - `btc_oracle_fallback_entry`: Candidate C dry-run 成交。

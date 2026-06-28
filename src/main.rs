@@ -1074,7 +1074,25 @@ impl TopQuote {
 }
 
 fn should_log_oracle_book_depth(seconds_left: i64) -> bool {
-    matches!(seconds_left, 15 | 8 | 5 | 3 | 2 | 1)
+    (1..=15).contains(&seconds_left)
+}
+
+fn btc_oracle_tier_window_floor(tiers: &[BtcOracleTier], entry_sec: i64) -> i64 {
+    tiers
+        .iter()
+        .filter(|tier| tier.entry_sec < entry_sec)
+        .map(|tier| tier.entry_sec)
+        .max()
+        .unwrap_or(0)
+}
+
+fn btc_oracle_tier_active(
+    tiers: &[BtcOracleTier],
+    tier: &BtcOracleTier,
+    seconds_left: i64,
+) -> bool {
+    seconds_left <= tier.entry_sec
+        && seconds_left > btc_oracle_tier_window_floor(tiers, tier.entry_sec)
 }
 
 struct Bot {
@@ -1510,23 +1528,11 @@ impl Bot {
             self.btc_locked.contains(&market.slug)
         };
 
-        let min_entry_sec = self
-            .cfg
-            .btc_oracle_tiers
-            .iter()
-            .map(|tier| tier.entry_sec)
-            .min()
-            .unwrap_or(0);
-        if seconds_left < min_entry_sec {
-            self.btc_locked.insert(market.slug.clone());
-            return Ok(());
-        }
-
         let tiers: Vec<BtcOracleTier> = self
             .cfg
             .btc_oracle_tiers
             .iter()
-            .filter(|tier| tier.entry_sec == seconds_left)
+            .filter(|tier| btc_oracle_tier_active(&self.cfg.btc_oracle_tiers, tier, seconds_left))
             .cloned()
             .collect();
         if tiers.is_empty() {
@@ -1614,12 +1620,16 @@ impl Bot {
             ("Down", dn_quote)
         };
 
-        let mut selected: Option<(BtcOracleTier, f64, f64, f64, f64)> = None;
+        let mut selected: Option<(BtcOracleTier, i64, f64, f64, f64, f64)> = None;
         let mut reject_reasons: Vec<serde_json::Value> = Vec::new();
         'tier_loop: for tier in tiers {
+            let tier_window_floor_sec =
+                btc_oracle_tier_window_floor(&self.cfg.btc_oracle_tiers, tier.entry_sec);
             if abs_bps < tier.min_abs_bps {
                 reject_reasons.push(json!({
                     "tier": tier.label,
+                    "tier_entry_sec": tier.entry_sec,
+                    "tier_window_floor_sec": tier_window_floor_sec,
                     "reason": "btc_too_close",
                     "abs_bps": abs_bps,
                     "min_abs_bps": tier.min_abs_bps,
@@ -1637,6 +1647,8 @@ impl Bot {
                 let Some(ret_value) = ret_value else {
                     reject_reasons.push(json!({
                         "tier": tier.label,
+                        "tier_entry_sec": tier.entry_sec,
+                        "tier_window_floor_sec": tier_window_floor_sec,
                         "reason": "btc_ret_missing",
                         "ret": ret_name,
                         "side": side,
@@ -1648,6 +1660,8 @@ impl Bot {
                 if signed_ret < min_ret {
                     reject_reasons.push(json!({
                         "tier": tier.label,
+                        "tier_entry_sec": tier.entry_sec,
+                        "tier_window_floor_sec": tier_window_floor_sec,
                         "reason": "btc_ret_too_weak",
                         "ret": ret_name,
                         "side": side,
@@ -1661,6 +1675,8 @@ impl Bot {
             let Some(ask) = quote.ask else {
                 reject_reasons.push(json!({
                     "tier": tier.label,
+                    "tier_entry_sec": tier.entry_sec,
+                    "tier_window_floor_sec": tier_window_floor_sec,
                     "reason": "ask_missing",
                     "side": side,
                     "quote_source": quote.source,
@@ -1670,6 +1686,8 @@ impl Bot {
             let Some(bid) = quote.bid else {
                 reject_reasons.push(json!({
                     "tier": tier.label,
+                    "tier_entry_sec": tier.entry_sec,
+                    "tier_window_floor_sec": tier_window_floor_sec,
                     "reason": "bid_missing",
                     "side": side,
                     "ask": ask,
@@ -1680,6 +1698,8 @@ impl Bot {
             if ask <= 0.0 || ask >= 1.0 || bid <= 0.0 || bid >= 1.0 {
                 reject_reasons.push(json!({
                     "tier": tier.label,
+                    "tier_entry_sec": tier.entry_sec,
+                    "tier_window_floor_sec": tier_window_floor_sec,
                     "reason": "bad_quote",
                     "side": side,
                     "ask": ask,
@@ -1690,6 +1710,8 @@ impl Bot {
             if ask > tier.max_ask {
                 reject_reasons.push(json!({
                     "tier": tier.label,
+                    "tier_entry_sec": tier.entry_sec,
+                    "tier_window_floor_sec": tier_window_floor_sec,
                     "reason": "ask_too_high",
                     "side": side,
                     "ask": ask,
@@ -1700,6 +1722,8 @@ impl Bot {
             if ask < tier.min_ask {
                 reject_reasons.push(json!({
                     "tier": tier.label,
+                    "tier_entry_sec": tier.entry_sec,
+                    "tier_window_floor_sec": tier_window_floor_sec,
                     "reason": "ask_too_low",
                     "side": side,
                     "ask": ask,
@@ -1712,6 +1736,8 @@ impl Bot {
                 if spread > max_spread {
                     reject_reasons.push(json!({
                         "tier": tier.label,
+                        "tier_entry_sec": tier.entry_sec,
+                        "tier_window_floor_sec": tier_window_floor_sec,
                         "reason": "spread_too_wide",
                         "side": side,
                         "ask": ask,
@@ -1722,11 +1748,18 @@ impl Bot {
                     continue;
                 }
             }
-            selected = Some((tier, ask, bid, quote.ask_size.unwrap_or(0.0), spread));
+            selected = Some((
+                tier,
+                tier_window_floor_sec,
+                ask,
+                bid,
+                quote.ask_size.unwrap_or(0.0),
+                spread,
+            ));
             break;
         }
 
-        let Some((tier, ask, bid, ask_size, spread)) = selected else {
+        let Some((tier, tier_window_floor_sec, ask, bid, ask_size, spread)) = selected else {
             if self.btc_oracle_skip_logged.insert(format!(
                 "{}:{seconds_left}:{}:no_tier",
                 market.slug,
@@ -1786,6 +1819,8 @@ impl Bot {
                         "market": market.slug,
                         "seconds_left": seconds_left,
                         "tier": tier.label,
+                        "tier_entry_sec": tier.entry_sec,
+                        "tier_window_floor_sec": tier_window_floor_sec,
                         "side": side,
                         "ask": ask,
                         "bid": bid,
@@ -1815,6 +1850,8 @@ impl Bot {
                     seconds_left,
                     json!({
                         "tier": tier.label,
+                        "tier_entry_sec": tier.entry_sec,
+                        "tier_window_floor_sec": tier_window_floor_sec,
                         "side": side,
                         "ask": ask,
                         "ask_size": ask_size,
@@ -1843,6 +1880,8 @@ impl Bot {
                     "shadow_only": true,
                     "would_trade": true,
                     "tier": tier.label,
+                    "tier_entry_sec": tier.entry_sec,
+                    "tier_window_floor_sec": tier_window_floor_sec,
                     "market": market.slug,
                     "direction": side,
                     "price": ask,
@@ -1876,6 +1915,8 @@ impl Bot {
             "phase": "intent",
             "label": "btc_oracle_fallback_entry",
             "tier": tier.label,
+            "tier_entry_sec": tier.entry_sec,
+            "tier_window_floor_sec": tier_window_floor_sec,
             "market": market.slug,
             "direction": side,
             "price": ask,
@@ -1912,6 +1953,8 @@ impl Bot {
             "phase": "submit",
             "label": "btc_oracle_fallback_entry",
             "tier": tier.label,
+            "tier_entry_sec": tier.entry_sec,
+            "tier_window_floor_sec": tier_window_floor_sec,
             "market": market.slug,
             "direction": side,
             "order_id": fill.order_id,
@@ -1957,6 +2000,8 @@ impl Bot {
             "phase": "btc_oracle_fallback_entry",
             "market": market.slug,
             "tier": tier.label,
+            "tier_entry_sec": tier.entry_sec,
+            "tier_window_floor_sec": tier_window_floor_sec,
             "direction": side,
             "price": filled_price,
             "shares": filled_shares,
@@ -3279,5 +3324,43 @@ mod tests {
         .expect("profile should parse");
         assert_eq!(tiers.len(), 1);
         assert_eq!(tiers[0].min_ask, 0.5);
+    }
+
+    #[test]
+    fn btc_oracle_profile_secs_define_windows() {
+        let tiers = parse_btc_oracle_profile(DEFAULT_BTC_ORACLE_PROFILE)
+            .expect("default profile should parse");
+        let t15 = tiers.iter().find(|tier| tier.label == "t15_momo").unwrap();
+        let e8 = tiers.iter().find(|tier| tier.label == "e8_strong").unwrap();
+        let e5 = tiers.iter().find(|tier| tier.label == "e5_strong").unwrap();
+        let e3 = tiers.iter().find(|tier| tier.label == "e3_final").unwrap();
+
+        assert!(btc_oracle_tier_active(&tiers, t15, 15));
+        assert!(btc_oracle_tier_active(&tiers, t15, 9));
+        assert!(!btc_oracle_tier_active(&tiers, t15, 8));
+
+        assert!(btc_oracle_tier_active(&tiers, e8, 8));
+        assert!(btc_oracle_tier_active(&tiers, e8, 7));
+        assert!(btc_oracle_tier_active(&tiers, e8, 6));
+        assert!(!btc_oracle_tier_active(&tiers, e8, 5));
+
+        assert!(btc_oracle_tier_active(&tiers, e5, 5));
+        assert!(btc_oracle_tier_active(&tiers, e5, 4));
+        assert!(!btc_oracle_tier_active(&tiers, e5, 3));
+
+        assert!(btc_oracle_tier_active(&tiers, e3, 3));
+        assert!(btc_oracle_tier_active(&tiers, e3, 2));
+        assert!(btc_oracle_tier_active(&tiers, e3, 1));
+        assert!(!btc_oracle_tier_active(&tiers, e3, 0));
+    }
+
+    #[test]
+    fn logs_oracle_book_depth_for_whole_tail_window() {
+        assert!(should_log_oracle_book_depth(15));
+        assert!(should_log_oracle_book_depth(7));
+        assert!(should_log_oracle_book_depth(4));
+        assert!(should_log_oracle_book_depth(1));
+        assert!(!should_log_oracle_book_depth(16));
+        assert!(!should_log_oracle_book_depth(0));
     }
 }

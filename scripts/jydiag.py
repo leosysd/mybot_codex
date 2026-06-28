@@ -49,10 +49,30 @@ def load_state(path: Path) -> list[dict[str, Any]]:
     return []
 
 
+def related_signal_paths(path: Path) -> list[Path]:
+    out: list[Path] = []
+    seen: set[Path] = set()
+    if path.exists():
+        out.append(path)
+        seen.add(path)
+    parent = path.parent if path.parent != Path("") else Path(".")
+    stem = path.stem
+    suffix = path.suffix
+    pattern = f"{stem}_*{suffix}" if suffix else f"{stem}_*"
+    for candidate in sorted(parent.glob(pattern)):
+        if candidate.is_file() and candidate not in seen:
+            out.append(candidate)
+            seen.add(candidate)
+    return out
+
+
 def iter_jsonl(path: Path, max_lines: int) -> list[dict[str, Any]]:
-    if not path.exists():
+    paths = related_signal_paths(path)
+    if not paths:
         return []
-    raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    raw_lines: list[str] = []
+    for signal_path in paths:
+        raw_lines.extend(signal_path.read_text(encoding="utf-8", errors="replace").splitlines())
     if max_lines > 0:
         raw_lines = raw_lines[-max_lines:]
     rows: list[dict[str, Any]] = []

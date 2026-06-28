@@ -1457,13 +1457,12 @@ impl Bot {
         seconds_left: i64,
     ) -> Result<()> {
         self.maybe_capture_btc_start(market, seconds_left).await?;
-        if self.state.has_trade(&market.slug) {
+        let shadow_only = if self.state.has_trade(&market.slug) {
             self.btc_locked.insert(market.slug.clone());
-            return Ok(());
-        }
-        if self.btc_locked.contains(&market.slug) {
-            return Ok(());
-        }
+            true
+        } else {
+            self.btc_locked.contains(&market.slug)
+        };
 
         let min_entry_sec = self
             .cfg
@@ -1488,7 +1487,7 @@ impl Bot {
             return Ok(());
         }
 
-        if self.cfg.btc_oracle_daily_take_profit > 0.0 {
+        if !shadow_only && self.cfg.btc_oracle_daily_take_profit > 0.0 {
             let today = Utc::now().timestamp().div_euclid(86_400);
             let day_pnl = self.state.realized_pnl_for_utc_day(today);
             if day_pnl >= self.cfg.btc_oracle_daily_take_profit {
@@ -1682,13 +1681,15 @@ impl Bot {
         }
 
         let Some((tier, ask, bid, ask_size, spread)) = selected else {
-            if self
-                .btc_oracle_skip_logged
-                .insert(format!("{}:{seconds_left}:no_tier", market.slug))
-            {
+            if self.btc_oracle_skip_logged.insert(format!(
+                "{}:{seconds_left}:{}:no_tier",
+                market.slug,
+                if shadow_only { "shadow" } else { "live" }
+            )) {
                 self.signal(json!({
-                    "phase": "btc_oracle_block",
+                    "phase": if shadow_only { "btc_oracle_shadow_block" } else { "btc_oracle_block" },
                     "reason": "no_eligible_tier",
+                    "shadow_only": shadow_only,
                     "market": market.slug,
                     "seconds_left": seconds_left,
                     "side": side,
@@ -1727,6 +1728,40 @@ impl Bot {
             .min((budget / cost_per_share).floor());
         let planned_cost = planned * cost_per_share;
         if planned < 1.0 || planned_cost < 1.0 {
+            if shadow_only {
+                if self.btc_oracle_skip_logged.insert(format!(
+                    "{}:{seconds_left}:shadow:planned_small",
+                    market.slug
+                )) {
+                    self.signal(json!({
+                        "phase": "btc_oracle_shadow_block",
+                        "reason": "btc_oracle_planned_order_too_small",
+                        "shadow_only": true,
+                        "market": market.slug,
+                        "seconds_left": seconds_left,
+                        "tier": tier.label,
+                        "side": side,
+                        "ask": ask,
+                        "bid": bid,
+                        "ask_size": ask_size,
+                        "equity": equity,
+                        "max_deploy": max_deploy,
+                        "budget_frac": tier.budget_frac,
+                        "budget": budget,
+                        "planned_shares": planned,
+                        "planned_cost": planned_cost,
+                        "btc_start_price": start_price,
+                        "btc_entry_price": tick.value,
+                        "btc_from_start_bps": bps,
+                        "btc_ret_3s_bps": btc_ret_3s_bps,
+                        "btc_ret_5s_bps": btc_ret_5s_bps,
+                        "btc_ret_10s_bps": btc_ret_10s_bps,
+                        "ts": Utc::now().timestamp(),
+                    }))
+                    .await?;
+                }
+                return Ok(());
+            }
             return self
                 .btc_distance_block(
                     market,
@@ -1749,6 +1784,45 @@ impl Bot {
                     }),
                 )
                 .await;
+        }
+
+        if shadow_only {
+            if self
+                .btc_oracle_skip_logged
+                .insert(format!("{}:{seconds_left}:shadow:intent", market.slug))
+            {
+                self.signal(json!({
+                    "phase": "btc_oracle_shadow_intent",
+                    "label": "btc_oracle_fallback_entry",
+                    "shadow_only": true,
+                    "would_trade": true,
+                    "tier": tier.label,
+                    "market": market.slug,
+                    "direction": side,
+                    "price": ask,
+                    "bid": bid,
+                    "spread": spread,
+                    "shares": planned,
+                    "ask_size": ask_size,
+                    "equity": equity,
+                    "max_deploy": max_deploy,
+                    "budget_frac": tier.budget_frac,
+                    "planned_cost": planned_cost,
+                    "btc_start_price": start_price,
+                    "btc_entry_price": tick.value,
+                    "btc_from_start_bps": bps,
+                    "btc_ret_3s_bps": btc_ret_3s_bps,
+                    "btc_ret_5s_bps": btc_ret_5s_bps,
+                    "btc_ret_10s_bps": btc_ret_10s_bps,
+                    "btc_price_age_ms": btc_age_ms,
+                    "seconds_left": seconds_left,
+                    "quote_source": quote.source,
+                    "mode": "shadow_fak",
+                    "ts": Utc::now().timestamp(),
+                }))
+                .await?;
+            }
+            return Ok(());
         }
 
         self.btc_locked.insert(market.slug.clone());
@@ -2876,11 +2950,45 @@ impl Bot {
         Ok(())
     }
 
+    fn daily_signal_file(&self, ts: i64) -> PathBuf {
+        let day = DateTime::<Utc>::from_timestamp(ts, 0)
+            .unwrap_or_else(Utc::now)
+            .format("%Y%m%d");
+        let parent = self
+            .cfg
+            .signal_file
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        let stem = self
+            .cfg
+            .signal_file
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("signals");
+        match self
+            .cfg
+            .signal_file
+            .extension()
+            .and_then(|value| value.to_str())
+        {
+            Some(ext) if !ext.is_empty() => parent.join(format!("{stem}_{day}.{ext}")),
+            _ => parent.join(format!("{stem}_{day}")),
+        }
+    }
+
     async fn signal(&self, v: serde_json::Value) -> Result<()> {
+        let ts = v
+            .get("ts")
+            .and_then(|value| value.as_i64())
+            .unwrap_or_else(|| Utc::now().timestamp());
+        let signal_file = self.daily_signal_file(ts);
+        if let Some(parent) = signal_file.parent() {
+            fs::create_dir_all(parent).await?;
+        }
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.cfg.signal_file)
+            .open(signal_file)
             .await?;
         f.write_all((serde_json::to_string(&v)? + "\n").as_bytes())
             .await?;

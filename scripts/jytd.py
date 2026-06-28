@@ -69,6 +69,26 @@ def resolve_signal_path(env_path: Path, override: str | None = None) -> Path | s
     return env_path.parent / path
 
 
+def related_signal_paths(path: Path | str) -> list[Path]:
+    if path == "-":
+        return []
+    p = Path(path)
+    out: list[Path] = []
+    seen: set[Path] = set()
+    if p.exists():
+        out.append(p)
+        seen.add(p)
+    parent = p.parent if p.parent != Path("") else Path(".")
+    stem = p.stem
+    suffix = p.suffix
+    pattern = f"{stem}_*{suffix}" if suffix else f"{stem}_*"
+    for candidate in sorted(parent.glob(pattern)):
+        if candidate.is_file() and candidate not in seen:
+            out.append(candidate)
+            seen.add(candidate)
+    return out
+
+
 def load_state(path: Path | str) -> list[dict[str, Any]]:
     if path == "-":
         text = sys.stdin.read()
@@ -95,23 +115,21 @@ def load_state(path: Path | str) -> list[dict[str, Any]]:
 def latest_service_start(path: Path | str) -> int | None:
     if path == "-":
         return None
-    p = Path(path)
-    if not p.exists():
-        return None
     latest: int | None = None
-    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict) and row.get("phase") == "service_start":
-            try:
-                ts = int(row.get("ts") or 0)
-            except (TypeError, ValueError):
+    for p in related_signal_paths(path):
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
                 continue
-            latest = ts if latest is None else max(latest, ts)
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict) and row.get("phase") == "service_start":
+                try:
+                    ts = int(row.get("ts") or 0)
+                except (TypeError, ValueError):
+                    continue
+                latest = ts if latest is None else max(latest, ts)
     return latest
 
 

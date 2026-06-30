@@ -1631,6 +1631,16 @@ impl Bot {
         'tier_loop: for tier in tiers {
             let tier_window_floor_sec =
                 btc_oracle_tier_window_floor(&self.cfg.btc_oracle_tiers, tier.entry_sec);
+            if tier.budget_frac <= 0.0 {
+                reject_reasons.push(json!({
+                    "tier": tier.label,
+                    "tier_entry_sec": tier.entry_sec,
+                    "tier_window_floor_sec": tier_window_floor_sec,
+                    "reason": "tier_disabled",
+                    "budget_frac": tier.budget_frac,
+                }));
+                continue;
+            }
             if abs_bps < tier.min_abs_bps {
                 reject_reasons.push(json!({
                     "tier": tier.label,
@@ -1956,7 +1966,7 @@ impl Bot {
             "seconds_left": seconds_left,
             "quote_source": quote.source,
             "mode": "limit_fak_fixed_shares",
-            "limit_price": 0.999,
+            "requested_limit_price": 0.999,
             "ts": Utc::now().timestamp(),
         }))
         .await?;
@@ -3226,12 +3236,18 @@ impl OrderExecutor {
                 let tid = U256::from_str(token_id)
                     .with_context(|| format!("token_id parse failed: {token_id}"))?;
                 let size = SdkDecimal::from_str(&format!("{order_shares:.0}"))?;
-                let price_cap = limit_price
-                    .map(|x| SdkDecimal::from_str(&clob_price_string(x.clamp(0.01, 0.999))))
-                    .transpose()
-                    .context("limit price conversion failed")?;
-                let price_cap = price_cap
-                    .unwrap_or_else(|| SdkDecimal::from_str(&clob_price_string(price)).unwrap());
+                let requested_price = limit_price.unwrap_or(price);
+                let tick = client
+                    .tick_size(tid)
+                    .await
+                    .context("fetch CLOB tick size failed")?
+                    .minimum_tick_size
+                    .as_decimal();
+                let tick_size = tick
+                    .to_string()
+                    .parse::<f64>()
+                    .context("tick size conversion failed")?;
+                let price_cap = clob_price_for_tick(requested_price, tick_size, tick.scale())?;
 
                 let t_build = std::time::Instant::now();
                 let order = client
@@ -3309,15 +3325,18 @@ fn normalize_order_shares(shares: f64) -> Result<f64> {
     Ok(shares.round().max(1.0))
 }
 
-fn clob_price_string(price: f64) -> String {
-    let mut s = format!("{price:.4}");
-    while s.contains('.') && s.ends_with('0') {
-        s.pop();
+fn clob_price_for_tick(price: f64, tick_size: f64, tick_scale: u32) -> Result<SdkDecimal> {
+    if !price.is_finite() || !tick_size.is_finite() || tick_size <= 0.0 || tick_size >= 1.0 {
+        bail!("invalid price/tick: price={price} tick_size={tick_size}");
     }
-    if s.ends_with('.') {
-        s.push('0');
-    }
-    s
+    let min_price = tick_size;
+    let max_price = (1.0 - tick_size).max(min_price);
+    let capped = price.clamp(min_price, max_price);
+    let factor = 10_f64.powi(tick_scale as i32);
+    let floored = ((capped * factor) + 1e-9).floor() / factor;
+    let normalized = floored.clamp(min_price, max_price);
+    let price_text = format!("{:.*}", tick_scale as usize, normalized);
+    SdkDecimal::from_str(&price_text).context("tick-normalized CLOB price conversion failed")
 }
 
 fn map_sig_type(t: u8) -> SignatureType {
@@ -3366,6 +3385,18 @@ mod tests {
         assert_eq!(btc_oracle_equity_share_order(302.8, 0.25, 1000.0), 75.0);
         assert_eq!(btc_oracle_equity_share_order(4000.0, 0.25, 1000.0), 1000.0);
         assert_eq!(btc_oracle_equity_share_order(0.0, 0.25, 1000.0), 0.0);
+    }
+
+    #[test]
+    fn fixed_share_limit_price_respects_tick_size() {
+        assert_eq!(
+            clob_price_for_tick(0.999, 0.01, 2).unwrap().to_string(),
+            "0.99"
+        );
+        assert_eq!(
+            clob_price_for_tick(0.999, 0.001, 3).unwrap().to_string(),
+            "0.999"
+        );
     }
 
     #[test]

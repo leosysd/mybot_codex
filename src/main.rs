@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use polymarket_client_sdk_v2::auth::state::Authenticated;
 use polymarket_client_sdk_v2::auth::Normal;
-use polymarket_client_sdk_v2::clob::types::{Amount, OrderType, Side, SignatureType};
+use polymarket_client_sdk_v2::clob::types::{OrderType, Side, SignatureType};
 use polymarket_client_sdk_v2::clob::{Client, Config as ClobConfig};
 use polymarket_client_sdk_v2::types::{Address, Decimal as SdkDecimal, U256};
 use polymarket_client_sdk_v2::POLYGON;
@@ -1955,7 +1955,8 @@ impl Bot {
             "btc_price_age_ms": btc_age_ms,
             "seconds_left": seconds_left,
             "quote_source": quote.source,
-            "mode": "dry_run_fak",
+            "mode": "limit_fak_fixed_shares",
+            "limit_price": 0.999,
             "ts": Utc::now().timestamp(),
         }))
         .await?;
@@ -1965,7 +1966,7 @@ impl Bot {
             .ok_or_else(|| anyhow!("missing token for side {side}"))?;
         let fill = self
             .executor
-            .buy_fak(token, ask, planned, Some(0.99))
+            .buy_fak(token, ask, planned, Some(0.999))
             .await?;
         self.signal(json!({
             "phase": "submit",
@@ -3224,24 +3225,25 @@ impl OrderExecutor {
             Self::Live { client, signer } => {
                 let tid = U256::from_str(token_id)
                     .with_context(|| format!("token_id parse failed: {token_id}"))?;
-                let s = SdkDecimal::from_str(&format!("{order_shares:.0}"))?;
-                let amount = Amount::shares(s).context("share amount conversion failed")?;
+                let size = SdkDecimal::from_str(&format!("{order_shares:.0}"))?;
                 let price_cap = limit_price
-                    .map(|x| SdkDecimal::from_str(&clob_price_string(x.clamp(0.01, 0.99))))
+                    .map(|x| SdkDecimal::from_str(&clob_price_string(x.clamp(0.01, 0.999))))
                     .transpose()
                     .context("limit price conversion failed")?;
+                let price_cap = price_cap
+                    .unwrap_or_else(|| SdkDecimal::from_str(&clob_price_string(price)).unwrap());
 
                 let t_build = std::time::Instant::now();
-                let mut builder = client
-                    .market_order()
+                let order = client
+                    .limit_order()
                     .token_id(tid)
                     .side(Side::Buy)
-                    .amount(amount)
-                    .order_type(OrderType::FAK);
-                if let Some(p) = price_cap {
-                    builder = builder.price(p);
-                }
-                let order = builder.build().await.context("build FAK order failed")?;
+                    .price(price_cap)
+                    .size(size)
+                    .order_type(OrderType::FAK)
+                    .build()
+                    .await
+                    .context("build fixed-share FAK order failed")?;
                 let build_ms = t_build.elapsed().as_millis();
 
                 let t_sign = std::time::Instant::now();
@@ -3255,8 +3257,8 @@ impl OrderExecutor {
                 let resp_result = client.post_order(signed).await;
                 let post_ms = t_post.elapsed().as_millis();
                 info!(
-                    "order latency build={}ms sign={}ms post={}ms",
-                    build_ms, sign_ms, post_ms
+                    "order latency build={}ms sign={}ms post={}ms fixed_shares={} limit_price={}",
+                    build_ms, sign_ms, post_ms, order_shares, price_cap
                 );
 
                 let resp = match resp_result {

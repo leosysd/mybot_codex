@@ -348,6 +348,7 @@ BTC_ORACLE_PROFILE=label=t15_momo,sec=15,bps=5,ask=0.98,spread=0.10,frac=1,ret3=
 BTC_ORACLE_RISK_FRACTION=0.25
 BTC_ORACLE_MAX_DEPLOY_USDC=270
 BTC_ORACLE_DAILY_TAKE_PROFIT=800
+BTC_ORACLE_LIMIT_SLIPPAGE=0.01
 ```
 
 Candidate C 参数。
@@ -364,6 +365,7 @@ Candidate C 参数。
 - `BTC_ORACLE_RISK_FRACTION=0.25`: 每盘最多用当前 dry-run 权益的 25%。
 - `BTC_ORACLE_MAX_DEPLOY_USDC=270`: 每个盘口硬上限 270u。
 - `BTC_ORACLE_DAILY_TAKE_PROFIT=800`: 当天已结算 dry-run PnL 到 800u 后停止当天新开仓。
+- `BTC_ORACLE_LIMIT_SLIPPAGE=0.01`: BUY FAK 限价 = 当前选中方向顶档 `ask + 0.01`，然后按 CLOB tick 自动规整；只影响这一笔买单限价，不会追加第二笔 SELL。
 
 Candidate C + late minask 默认 profile，在 Candidate B 前增加 T-15 短动量提前层，并要求 T-8/T-5/T-3 的选中方向 ask 至少 0.5：
 

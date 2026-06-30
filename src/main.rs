@@ -48,13 +48,14 @@ async fn main() -> Result<()> {
     );
     if cfg.strategy == "btc_oracle_fallback" {
         info!(
-            "btc_oracle_fallback tiers={} risk_fraction={} max_deploy={} daily_tp={} share_fraction={} max_order_shares={}",
+            "btc_oracle_fallback tiers={} risk_fraction={} max_deploy={} daily_tp={} share_fraction={} max_order_shares={} limit_slippage={}",
             cfg.btc_oracle_tiers.len(),
             cfg.btc_oracle_risk_fraction,
             cfg.btc_oracle_max_deploy_usdc,
             cfg.btc_oracle_daily_take_profit,
             cfg.btc_oracle_share_fraction,
-            cfg.btc_oracle_max_order_shares
+            cfg.btc_oracle_max_order_shares,
+            cfg.btc_oracle_limit_slippage
         );
     }
 
@@ -166,6 +167,7 @@ struct Config {
     btc_oracle_daily_take_profit: f64,
     btc_oracle_share_fraction: f64,
     btc_oracle_max_order_shares: f64,
+    btc_oracle_limit_slippage: f64,
 }
 
 impl Config {
@@ -246,6 +248,7 @@ impl Config {
             btc_oracle_daily_take_profit: env_f64("BTC_ORACLE_DAILY_TAKE_PROFIT", 800.0),
             btc_oracle_share_fraction: env_f64("BTC_ORACLE_SHARE_FRACTION", 0.25),
             btc_oracle_max_order_shares: env_f64("BTC_ORACLE_MAX_ORDER_SHARES", 1000.0),
+            btc_oracle_limit_slippage: env_f64("BTC_ORACLE_LIMIT_SLIPPAGE", 0.01),
         })
     }
 }
@@ -1891,6 +1894,9 @@ impl Bot {
                 .await;
         }
 
+        let requested_limit_price =
+            btc_oracle_buy_limit_price(ask, self.cfg.btc_oracle_limit_slippage);
+
         if shadow_only {
             if self
                 .btc_oracle_skip_logged
@@ -1928,6 +1934,8 @@ impl Bot {
                     "seconds_left": seconds_left,
                     "quote_source": quote.source,
                     "mode": "shadow_fak",
+                    "limit_slippage": self.cfg.btc_oracle_limit_slippage,
+                    "requested_limit_price": requested_limit_price,
                     "ts": Utc::now().timestamp(),
                 }))
                 .await?;
@@ -1965,8 +1973,9 @@ impl Bot {
             "btc_price_age_ms": btc_age_ms,
             "seconds_left": seconds_left,
             "quote_source": quote.source,
-            "mode": "limit_fak_fixed_shares",
-            "requested_limit_price": 0.999,
+            "mode": "limit_fak_ask_slippage",
+            "limit_slippage": self.cfg.btc_oracle_limit_slippage,
+            "requested_limit_price": requested_limit_price,
             "ts": Utc::now().timestamp(),
         }))
         .await?;
@@ -1976,7 +1985,7 @@ impl Bot {
             .ok_or_else(|| anyhow!("missing token for side {side}"))?;
         let fill = self
             .executor
-            .buy_fak(token, ask, planned, Some(0.999))
+            .buy_fak(token, ask, planned, Some(requested_limit_price))
             .await?;
         self.signal(json!({
             "phase": "submit",
@@ -3150,6 +3159,16 @@ fn btc_oracle_equity_share_order(equity: f64, share_fraction: f64, max_order_sha
     (equity * share_fraction).min(max_order_shares).floor()
 }
 
+fn btc_oracle_buy_limit_price(ask: f64, slippage: f64) -> f64 {
+    let safe_ask = if ask.is_finite() { ask } else { 0.0 };
+    let safe_slippage = if slippage.is_finite() {
+        slippage.max(0.0)
+    } else {
+        0.0
+    };
+    (safe_ask + safe_slippage).clamp(0.0, 0.999)
+}
+
 #[derive(Debug, Clone)]
 struct Fill {
     order_id: String,
@@ -3169,6 +3188,17 @@ impl Fill {
             simulated: true,
             filled_price: price,
             filled_shares: shares,
+        }
+    }
+
+    fn empty(status: impl Into<String>, price: f64) -> Self {
+        Self {
+            order_id: String::new(),
+            status: status.into(),
+            success: false,
+            simulated: false,
+            filled_price: price,
+            filled_shares: 0.0,
         }
     }
 }
@@ -3281,14 +3311,7 @@ impl OrderExecutor {
                     Ok(r) => r,
                     Err(e) if e.to_string().contains("no orders found to match") => {
                         warn!("FAK unmatched; no fill");
-                        return Ok(Fill {
-                            order_id: String::new(),
-                            status: "unmatched".to_string(),
-                            success: false,
-                            simulated: false,
-                            filled_price: price,
-                            filled_shares: 0.0,
-                        });
+                        return Ok(Fill::empty("unmatched", price));
                     }
                     Err(e) => return Err(e).context("post FAK order failed"),
                 };
@@ -3296,14 +3319,9 @@ impl OrderExecutor {
                 let making = resp.making_amount.to_string().parse::<f64>().unwrap_or(0.0);
                 let taking = resp.taking_amount.to_string().parse::<f64>().unwrap_or(0.0);
                 if taking <= 0.0 {
-                    return Ok(Fill {
-                        order_id: resp.order_id,
-                        status: resp.status.to_string(),
-                        success: false,
-                        simulated: false,
-                        filled_price: price,
-                        filled_shares: 0.0,
-                    });
+                    let mut fill = Fill::empty(resp.status.to_string(), price);
+                    fill.order_id = resp.order_id;
+                    return Ok(fill);
                 }
                 Ok(Fill {
                     order_id: resp.order_id,
@@ -3397,6 +3415,13 @@ mod tests {
             clob_price_for_tick(0.999, 0.001, 3).unwrap().to_string(),
             "0.999"
         );
+    }
+
+    #[test]
+    fn btc_oracle_buy_limit_price_adds_configured_slippage() {
+        assert_eq!(btc_oracle_buy_limit_price(0.90, 0.01), 0.91);
+        assert_eq!(btc_oracle_buy_limit_price(0.90, -0.01), 0.90);
+        assert_eq!(btc_oracle_buy_limit_price(0.995, 0.01), 0.999);
     }
 
     #[test]

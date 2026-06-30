@@ -48,11 +48,13 @@ async fn main() -> Result<()> {
     );
     if cfg.strategy == "btc_oracle_fallback" {
         info!(
-            "btc_oracle_fallback tiers={} risk_fraction={} max_deploy={} daily_tp={}",
+            "btc_oracle_fallback tiers={} risk_fraction={} max_deploy={} daily_tp={} share_fraction={} max_order_shares={}",
             cfg.btc_oracle_tiers.len(),
             cfg.btc_oracle_risk_fraction,
             cfg.btc_oracle_max_deploy_usdc,
-            cfg.btc_oracle_daily_take_profit
+            cfg.btc_oracle_daily_take_profit,
+            cfg.btc_oracle_share_fraction,
+            cfg.btc_oracle_max_order_shares
         );
     }
 
@@ -162,6 +164,8 @@ struct Config {
     btc_oracle_risk_fraction: f64,
     btc_oracle_max_deploy_usdc: f64,
     btc_oracle_daily_take_profit: f64,
+    btc_oracle_share_fraction: f64,
+    btc_oracle_max_order_shares: f64,
 }
 
 impl Config {
@@ -240,6 +244,8 @@ impl Config {
             btc_oracle_risk_fraction: env_f64("BTC_ORACLE_RISK_FRACTION", 0.25),
             btc_oracle_max_deploy_usdc: env_f64("BTC_ORACLE_MAX_DEPLOY_USDC", 270.0),
             btc_oracle_daily_take_profit: env_f64("BTC_ORACLE_DAILY_TAKE_PROFIT", 800.0),
+            btc_oracle_share_fraction: env_f64("BTC_ORACLE_SHARE_FRACTION", 0.25),
+            btc_oracle_max_order_shares: env_f64("BTC_ORACLE_MAX_ORDER_SHARES", 1000.0),
         })
     }
 }
@@ -1800,11 +1806,11 @@ impl Bot {
         }
         let budget = max_deploy * tier.budget_frac.clamp(0.0, 1.0);
         let cost_per_share = full_cost_per_share(ask);
-        let planned = self
-            .cfg
-            .target_qty
-            .min(ask_size.floor())
-            .min((budget / cost_per_share).floor());
+        let planned = btc_oracle_equity_share_order(
+            equity,
+            self.cfg.btc_oracle_share_fraction,
+            self.cfg.btc_oracle_max_order_shares,
+        );
         let planned_cost = planned * cost_per_share;
         if planned < 1.0 || planned_cost < 1.0 {
             if shadow_only {
@@ -1828,6 +1834,9 @@ impl Bot {
                         "equity": equity,
                         "max_deploy": max_deploy,
                         "budget_frac": tier.budget_frac,
+                        "order_sizing": "equity_fraction_shares",
+                        "share_fraction": self.cfg.btc_oracle_share_fraction,
+                        "max_order_shares": self.cfg.btc_oracle_max_order_shares,
                         "budget": budget,
                         "planned_shares": planned,
                         "planned_cost": planned_cost,
@@ -1858,6 +1867,9 @@ impl Bot {
                         "equity": equity,
                         "max_deploy": max_deploy,
                         "budget_frac": tier.budget_frac,
+                        "order_sizing": "equity_fraction_shares",
+                        "share_fraction": self.cfg.btc_oracle_share_fraction,
+                        "max_order_shares": self.cfg.btc_oracle_max_order_shares,
                         "budget": budget,
                         "planned_shares": planned,
                         "planned_cost": planned_cost,
@@ -1892,6 +1904,9 @@ impl Bot {
                     "equity": equity,
                     "max_deploy": max_deploy,
                     "budget_frac": tier.budget_frac,
+                    "order_sizing": "equity_fraction_shares",
+                    "share_fraction": self.cfg.btc_oracle_share_fraction,
+                    "max_order_shares": self.cfg.btc_oracle_max_order_shares,
                     "planned_cost": planned_cost,
                     "btc_start_price": start_price,
                     "btc_entry_price": tick.value,
@@ -1927,6 +1942,9 @@ impl Bot {
             "equity": equity,
             "max_deploy": max_deploy,
             "budget_frac": tier.budget_frac,
+            "order_sizing": "equity_fraction_shares",
+            "share_fraction": self.cfg.btc_oracle_share_fraction,
+            "max_order_shares": self.cfg.btc_oracle_max_order_shares,
             "planned_cost": planned_cost,
             "btc_start_price": start_price,
             "btc_entry_price": tick.value,
@@ -3108,6 +3126,19 @@ fn full_cost_per_share(price: f64) -> f64 {
     price + taker_fee(price)
 }
 
+fn btc_oracle_equity_share_order(equity: f64, share_fraction: f64, max_order_shares: f64) -> f64 {
+    if !equity.is_finite()
+        || !share_fraction.is_finite()
+        || !max_order_shares.is_finite()
+        || equity <= 0.0
+        || share_fraction <= 0.0
+        || max_order_shares <= 0.0
+    {
+        return 0.0;
+    }
+    (equity * share_fraction).min(max_order_shares).floor()
+}
+
 #[derive(Debug, Clone)]
 struct Fill {
     order_id: String,
@@ -3324,6 +3355,15 @@ mod tests {
         .expect("profile should parse");
         assert_eq!(tiers.len(), 1);
         assert_eq!(tiers[0].min_ask, 0.5);
+    }
+
+    #[test]
+    fn btc_oracle_equity_share_order_uses_floor_and_cap() {
+        assert_eq!(btc_oracle_equity_share_order(288.32, 0.25, 1000.0), 72.0);
+        assert_eq!(btc_oracle_equity_share_order(300.0, 0.25, 1000.0), 75.0);
+        assert_eq!(btc_oracle_equity_share_order(302.8, 0.25, 1000.0), 75.0);
+        assert_eq!(btc_oracle_equity_share_order(4000.0, 0.25, 1000.0), 1000.0);
+        assert_eq!(btc_oracle_equity_share_order(0.0, 0.25, 1000.0), 0.0);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use polymarket_client_sdk_v2::auth::state::Authenticated;
 use polymarket_client_sdk_v2::auth::Normal;
-use polymarket_client_sdk_v2::clob::types::{OrderType, Side, SignatureType};
+use polymarket_client_sdk_v2::clob::types::{Amount, OrderType, Side, SignatureType};
 use polymarket_client_sdk_v2::clob::{Client, Config as ClobConfig};
 use polymarket_client_sdk_v2::types::{Address, Decimal as SdkDecimal, U256};
 use polymarket_client_sdk_v2::POLYGON;
@@ -48,13 +48,11 @@ async fn main() -> Result<()> {
     );
     if cfg.strategy == "btc_oracle_fallback" {
         info!(
-            "btc_oracle_fallback tiers={} risk_fraction={} max_deploy={} daily_tp={} share_fraction={} max_order_shares={} limit_slippage={}",
+            "btc_oracle_fallback tiers={} risk_fraction={} max_deploy={} daily_tp={} order_sizing=main_budget_planned_shares limit_slippage={}",
             cfg.btc_oracle_tiers.len(),
             cfg.btc_oracle_risk_fraction,
             cfg.btc_oracle_max_deploy_usdc,
             cfg.btc_oracle_daily_take_profit,
-            cfg.btc_oracle_share_fraction,
-            cfg.btc_oracle_max_order_shares,
             cfg.btc_oracle_limit_slippage
         );
     }
@@ -165,8 +163,6 @@ struct Config {
     btc_oracle_risk_fraction: f64,
     btc_oracle_max_deploy_usdc: f64,
     btc_oracle_daily_take_profit: f64,
-    btc_oracle_share_fraction: f64,
-    btc_oracle_max_order_shares: f64,
     btc_oracle_limit_slippage: f64,
 }
 
@@ -246,8 +242,6 @@ impl Config {
             btc_oracle_risk_fraction: env_f64("BTC_ORACLE_RISK_FRACTION", 0.25),
             btc_oracle_max_deploy_usdc: env_f64("BTC_ORACLE_MAX_DEPLOY_USDC", 270.0),
             btc_oracle_daily_take_profit: env_f64("BTC_ORACLE_DAILY_TAKE_PROFIT", 800.0),
-            btc_oracle_share_fraction: env_f64("BTC_ORACLE_SHARE_FRACTION", 0.25),
-            btc_oracle_max_order_shares: env_f64("BTC_ORACLE_MAX_ORDER_SHARES", 1000.0),
             btc_oracle_limit_slippage: env_f64("BTC_ORACLE_LIMIT_SLIPPAGE", 0.01),
         })
     }
@@ -1819,11 +1813,11 @@ impl Bot {
         }
         let budget = max_deploy * tier.budget_frac.clamp(0.0, 1.0);
         let cost_per_share = full_cost_per_share(ask);
-        let planned = btc_oracle_equity_share_order(
-            equity,
-            self.cfg.btc_oracle_share_fraction,
-            self.cfg.btc_oracle_max_order_shares,
-        );
+        let planned = self
+            .cfg
+            .target_qty
+            .min(ask_size.floor())
+            .min((budget / cost_per_share).floor());
         let planned_cost = planned * cost_per_share;
         if planned < 1.0 || planned_cost < 1.0 {
             if shadow_only {
@@ -1847,9 +1841,8 @@ impl Bot {
                         "equity": equity,
                         "max_deploy": max_deploy,
                         "budget_frac": tier.budget_frac,
-                        "order_sizing": "equity_fraction_shares",
-                        "share_fraction": self.cfg.btc_oracle_share_fraction,
-                        "max_order_shares": self.cfg.btc_oracle_max_order_shares,
+                        "order_sizing": "main_budget_planned_shares",
+                        "target_qty": self.cfg.target_qty,
                         "budget": budget,
                         "planned_shares": planned,
                         "planned_cost": planned_cost,
@@ -1880,9 +1873,8 @@ impl Bot {
                         "equity": equity,
                         "max_deploy": max_deploy,
                         "budget_frac": tier.budget_frac,
-                        "order_sizing": "equity_fraction_shares",
-                        "share_fraction": self.cfg.btc_oracle_share_fraction,
-                        "max_order_shares": self.cfg.btc_oracle_max_order_shares,
+                        "order_sizing": "main_budget_planned_shares",
+                        "target_qty": self.cfg.target_qty,
                         "budget": budget,
                         "planned_shares": planned,
                         "planned_cost": planned_cost,
@@ -1920,9 +1912,8 @@ impl Bot {
                     "equity": equity,
                     "max_deploy": max_deploy,
                     "budget_frac": tier.budget_frac,
-                    "order_sizing": "equity_fraction_shares",
-                    "share_fraction": self.cfg.btc_oracle_share_fraction,
-                    "max_order_shares": self.cfg.btc_oracle_max_order_shares,
+                    "order_sizing": "main_budget_planned_shares",
+                    "target_qty": self.cfg.target_qty,
                     "planned_cost": planned_cost,
                     "btc_start_price": start_price,
                     "btc_entry_price": tick.value,
@@ -1960,9 +1951,8 @@ impl Bot {
             "equity": equity,
             "max_deploy": max_deploy,
             "budget_frac": tier.budget_frac,
-            "order_sizing": "equity_fraction_shares",
-            "share_fraction": self.cfg.btc_oracle_share_fraction,
-            "max_order_shares": self.cfg.btc_oracle_max_order_shares,
+            "order_sizing": "main_budget_planned_shares",
+            "target_qty": self.cfg.target_qty,
             "planned_cost": planned_cost,
             "btc_start_price": start_price,
             "btc_entry_price": tick.value,
@@ -3146,19 +3136,6 @@ fn full_cost_per_share(price: f64) -> f64 {
     price + taker_fee(price)
 }
 
-fn btc_oracle_equity_share_order(equity: f64, share_fraction: f64, max_order_shares: f64) -> f64 {
-    if !equity.is_finite()
-        || !share_fraction.is_finite()
-        || !max_order_shares.is_finite()
-        || equity <= 0.0
-        || share_fraction <= 0.0
-        || max_order_shares <= 0.0
-    {
-        return 0.0;
-    }
-    (equity * share_fraction).min(max_order_shares).floor()
-}
-
 fn btc_oracle_buy_limit_price(ask: f64, slippage: f64) -> f64 {
     let safe_ask = if ask.is_finite() { ask } else { 0.0 };
     let safe_slippage = if slippage.is_finite() {
@@ -3266,6 +3243,7 @@ impl OrderExecutor {
                 let tid = U256::from_str(token_id)
                     .with_context(|| format!("token_id parse failed: {token_id}"))?;
                 let size = SdkDecimal::from_str(&format!("{order_shares:.0}"))?;
+                let amount = Amount::shares(size).context("share amount conversion failed")?;
                 let requested_price = limit_price.unwrap_or(price);
                 let tick = client
                     .tick_size(tid)
@@ -3280,16 +3258,14 @@ impl OrderExecutor {
                 let price_cap = clob_price_for_tick(requested_price, tick_size, tick.scale())?;
 
                 let t_build = std::time::Instant::now();
-                let order = client
-                    .limit_order()
+                let mut builder = client
+                    .market_order()
                     .token_id(tid)
                     .side(Side::Buy)
-                    .price(price_cap)
-                    .size(size)
-                    .order_type(OrderType::FAK)
-                    .build()
-                    .await
-                    .context("build fixed-share FAK order failed")?;
+                    .amount(amount)
+                    .order_type(OrderType::FAK);
+                builder = builder.price(price_cap);
+                let order = builder.build().await.context("build FAK order failed")?;
                 let build_ms = t_build.elapsed().as_millis();
 
                 let t_sign = std::time::Instant::now();
@@ -3303,7 +3279,7 @@ impl OrderExecutor {
                 let resp_result = client.post_order(signed).await;
                 let post_ms = t_post.elapsed().as_millis();
                 info!(
-                    "order latency build={}ms sign={}ms post={}ms fixed_shares={} limit_price={}",
+                    "order latency build={}ms sign={}ms post={}ms market_shares={} limit_price={}",
                     build_ms, sign_ms, post_ms, order_shares, price_cap
                 );
 
@@ -3397,16 +3373,7 @@ mod tests {
     }
 
     #[test]
-    fn btc_oracle_equity_share_order_uses_floor_and_cap() {
-        assert_eq!(btc_oracle_equity_share_order(288.32, 0.25, 1000.0), 72.0);
-        assert_eq!(btc_oracle_equity_share_order(300.0, 0.25, 1000.0), 75.0);
-        assert_eq!(btc_oracle_equity_share_order(302.8, 0.25, 1000.0), 75.0);
-        assert_eq!(btc_oracle_equity_share_order(4000.0, 0.25, 1000.0), 1000.0);
-        assert_eq!(btc_oracle_equity_share_order(0.0, 0.25, 1000.0), 0.0);
-    }
-
-    #[test]
-    fn fixed_share_limit_price_respects_tick_size() {
+    fn clob_limit_price_respects_tick_size() {
         assert_eq!(
             clob_price_for_tick(0.999, 0.01, 2).unwrap().to_string(),
             "0.99"

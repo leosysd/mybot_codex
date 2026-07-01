@@ -758,7 +758,7 @@ impl ClobClient {
         }
         let outcomes = parse_json_list(market.get("outcomes")?)?;
         let prices = parse_json_list(market.get("outcomePrices")?)?;
-        for (outcome, price) in outcomes.into_iter().zip(prices.into_iter()) {
+        for (outcome, price) in outcomes.into_iter().zip(prices) {
             if price.parse::<f64>().ok()? >= 0.99 {
                 return Some(outcome);
             }
@@ -1852,16 +1852,16 @@ impl Bot {
         }
         let budget = max_deploy * tier.budget_frac.clamp(0.0, 1.0);
         let cost_per_share = full_cost_per_share(ask);
-        let planned = btc_oracle_planned_shares(
-            self.cfg.btc_oracle_order_sizing,
-            self.cfg.target_qty,
+        let planned = btc_oracle_planned_shares(BtcOracleSizingInputs {
+            order_sizing: self.cfg.btc_oracle_order_sizing,
+            target_qty: self.cfg.target_qty,
             equity,
             ask_size,
             budget,
             cost_per_share,
-            self.cfg.btc_oracle_share_fraction,
-            self.cfg.btc_oracle_max_order_shares,
-        );
+            share_fraction: self.cfg.btc_oracle_share_fraction,
+            max_order_shares: self.cfg.btc_oracle_max_order_shares,
+        });
         let order_sizing = self.cfg.btc_oracle_order_sizing.as_str();
         let planned_cost = planned * cost_per_share;
         if planned < 1.0 || planned_cost < 1.0 {
@@ -2480,6 +2480,7 @@ impl Bot {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn decide_btc_distance_tail(
         &mut self,
         market: &Market,
@@ -3202,7 +3203,7 @@ fn btc_oracle_fixed_equity_shares(equity: f64, share_fraction: f64, max_order_sh
     (equity * share_fraction).min(max_order_shares).floor()
 }
 
-fn btc_oracle_planned_shares(
+struct BtcOracleSizingInputs {
     order_sizing: BtcOracleOrderSizing,
     target_qty: f64,
     equity: f64,
@@ -3211,15 +3212,18 @@ fn btc_oracle_planned_shares(
     cost_per_share: f64,
     share_fraction: f64,
     max_order_shares: f64,
-) -> f64 {
-    match order_sizing {
-        BtcOracleOrderSizing::BudgetDepth => target_qty
-            .min(ask_size.floor())
-            .min((budget / cost_per_share).floor()),
-        BtcOracleOrderSizing::FixedEquity => target_qty.min(btc_oracle_fixed_equity_shares(
-            equity,
-            share_fraction,
-            max_order_shares,
+}
+
+fn btc_oracle_planned_shares(input: BtcOracleSizingInputs) -> f64 {
+    match input.order_sizing {
+        BtcOracleOrderSizing::BudgetDepth => input
+            .target_qty
+            .min(input.ask_size.floor())
+            .min((input.budget / input.cost_per_share).floor()),
+        BtcOracleOrderSizing::FixedEquity => input.target_qty.min(btc_oracle_fixed_equity_shares(
+            input.equity,
+            input.share_fraction,
+            input.max_order_shares,
         )),
     }
 }
@@ -3483,31 +3487,31 @@ mod tests {
 
     #[test]
     fn btc_oracle_budget_depth_sizing_uses_top_ask_size() {
-        let planned = btc_oracle_planned_shares(
-            BtcOracleOrderSizing::BudgetDepth,
-            5000.0,
-            300.0,
-            10.4,
-            270.0,
-            0.75,
-            0.25,
-            270.0,
-        );
+        let planned = btc_oracle_planned_shares(BtcOracleSizingInputs {
+            order_sizing: BtcOracleOrderSizing::BudgetDepth,
+            target_qty: 5000.0,
+            equity: 300.0,
+            ask_size: 10.4,
+            budget: 270.0,
+            cost_per_share: 0.75,
+            share_fraction: 0.25,
+            max_order_shares: 270.0,
+        });
         assert_eq!(planned, 10.0);
     }
 
     #[test]
     fn btc_oracle_fixed_equity_sizing_ignores_top_ask_size() {
-        let planned = btc_oracle_planned_shares(
-            BtcOracleOrderSizing::FixedEquity,
-            5000.0,
-            300.0,
-            10.4,
-            270.0,
-            0.75,
-            0.25,
-            270.0,
-        );
+        let planned = btc_oracle_planned_shares(BtcOracleSizingInputs {
+            order_sizing: BtcOracleOrderSizing::FixedEquity,
+            target_qty: 5000.0,
+            equity: 300.0,
+            ask_size: 10.4,
+            budget: 270.0,
+            cost_per_share: 0.75,
+            share_fraction: 0.25,
+            max_order_shares: 270.0,
+        });
         assert_eq!(planned, 75.0);
         assert_eq!(btc_oracle_fixed_equity_shares(4000.0, 0.25, 270.0), 270.0);
     }

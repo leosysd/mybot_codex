@@ -175,6 +175,7 @@ struct Config {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BtcOracleOrderSizing {
     BudgetDepth,
+    BudgetNoTopAsk,
     FixedEquity,
 }
 
@@ -182,6 +183,7 @@ impl BtcOracleOrderSizing {
     fn as_str(self) -> &'static str {
         match self {
             Self::BudgetDepth => "budget_depth",
+            Self::BudgetNoTopAsk => "budget_no_topask",
             Self::FixedEquity => "fixed_equity",
         }
     }
@@ -338,10 +340,16 @@ fn parse_btc_oracle_order_sizing(raw: &str) -> Result<BtcOracleOrderSizing> {
         "b" | "budget" | "budget_depth" | "main_budget" | "main_budget_planned_shares" => {
             Ok(BtcOracleOrderSizing::BudgetDepth)
         }
+        "c" | "third" | "budget_no_topask" | "budget_no_top_ask" | "budget_no_depth"
+        | "budget_no_ask_size" | "budget_without_ask_size" => {
+            Ok(BtcOracleOrderSizing::BudgetNoTopAsk)
+        }
         "a" | "fixed" | "fixed_equity" | "fixed_equity_shares" => {
             Ok(BtcOracleOrderSizing::FixedEquity)
         }
-        other => bail!("bad BTC_ORACLE_ORDER_SIZING={other}; use budget_depth or fixed_equity"),
+        other => bail!(
+            "bad BTC_ORACLE_ORDER_SIZING={other}; use budget_depth, budget_no_topask, or fixed_equity"
+        ),
     }
 }
 
@@ -3220,6 +3228,9 @@ fn btc_oracle_planned_shares(input: BtcOracleSizingInputs) -> f64 {
             .target_qty
             .min(input.ask_size.floor())
             .min((input.budget / input.cost_per_share).floor()),
+        BtcOracleOrderSizing::BudgetNoTopAsk => input
+            .target_qty
+            .min((input.budget / input.cost_per_share).floor()),
         BtcOracleOrderSizing::FixedEquity => input.target_qty.min(btc_oracle_fixed_equity_shares(
             input.equity,
             input.share_fraction,
@@ -3475,6 +3486,14 @@ mod tests {
             BtcOracleOrderSizing::BudgetDepth
         );
         assert_eq!(
+            parse_btc_oracle_order_sizing("budget_no_topask").unwrap(),
+            BtcOracleOrderSizing::BudgetNoTopAsk
+        );
+        assert_eq!(
+            parse_btc_oracle_order_sizing("C").unwrap(),
+            BtcOracleOrderSizing::BudgetNoTopAsk
+        );
+        assert_eq!(
             parse_btc_oracle_order_sizing("fixed-equity").unwrap(),
             BtcOracleOrderSizing::FixedEquity
         );
@@ -3498,6 +3517,21 @@ mod tests {
             max_order_shares: 270.0,
         });
         assert_eq!(planned, 10.0);
+    }
+
+    #[test]
+    fn btc_oracle_budget_no_topask_sizing_ignores_top_ask_size() {
+        let planned = btc_oracle_planned_shares(BtcOracleSizingInputs {
+            order_sizing: BtcOracleOrderSizing::BudgetNoTopAsk,
+            target_qty: 5000.0,
+            equity: 300.0,
+            ask_size: 10.4,
+            budget: 270.0,
+            cost_per_share: 0.75,
+            share_fraction: 0.25,
+            max_order_shares: 270.0,
+        });
+        assert_eq!(planned, 360.0);
     }
 
     #[test]

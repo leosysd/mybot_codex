@@ -364,6 +364,14 @@ def main() -> int:
             + " daily_tp="
             + env.get("BTC_ORACLE_DAILY_TAKE_PROFIT", "-")
         )
+        print(
+            "  binance_momentum="
+            + env.get("BTC_ORACLE_BINANCE_MOMENTUM", "0")
+            + " ret1_min_bps="
+            + env.get("BTC_ORACLE_BINANCE_RET1_MIN_BPS", "0")
+            + " max_age_ms="
+            + env.get("BTC_ORACLE_BINANCE_MAX_AGE_MS", "1500")
+        )
 
     summarize_trades(trades)
     summarize_signals(signals)

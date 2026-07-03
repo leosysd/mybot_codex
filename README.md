@@ -349,6 +349,7 @@ BTC_ORACLE_RISK_FRACTION=0.25
 BTC_ORACLE_MAX_DEPLOY_USDC=270
 BTC_ORACLE_DAILY_TAKE_PROFIT=800
 BTC_ORACLE_LIMIT_SLIPPAGE=0.01
+BTC_ORACLE_BINANCE_MOMENTUM=0
 ```
 
 Candidate C 参数。
@@ -366,6 +367,9 @@ Candidate C 参数。
 - `BTC_ORACLE_MAX_DEPLOY_USDC=270`: 每个盘口硬上限 270u。
 - `BTC_ORACLE_DAILY_TAKE_PROFIT=800`: 当天已结算 dry-run PnL 到 800u 后停止当天新开仓。
 - `BTC_ORACLE_LIMIT_SLIPPAGE=0.01`: BUY FAK 限价 = 当前选中方向顶档 `ask + 0.01`，然后按 CLOB tick 自动规整；只影响这一笔买单限价，不会追加第二笔 SELL。
+- `BTC_ORACLE_BINANCE_MOMENTUM=1`: 打开 Binance BTCUSDT 1 秒动量过滤；`0` 为关闭并保持旧逻辑。
+- `BTC_ORACLE_BINANCE_RET1_MIN_BPS=0`: 打开过滤时，买 Up 要求 Binance 最近 1 秒涨幅 `>=0bp`，买 Down 要求最近 1 秒跌幅 `>=0bp`。调成 `0.05`、`0.1` 会更严格但会减少下单。
+- `BTC_ORACLE_BINANCE_MAX_AGE_MS=1500`: Binance 最新成交价超过此年龄就 veto 当前候选，继续等后续窗口。
 
 Candidate C + late minask 默认 profile，在 Candidate B 前增加 T-15 短动量提前层，并要求 T-8/T-5/T-3 的选中方向 ask 至少 0.5：
 

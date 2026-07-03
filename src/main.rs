@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
     );
     if cfg.strategy == "btc_oracle_fallback" {
         info!(
-            "btc_oracle_fallback tiers={} risk_fraction={} max_deploy={} daily_tp={} order_sizing={} share_fraction={} max_order_shares={} limit_slippage={}",
+            "btc_oracle_fallback tiers={} risk_fraction={} max_deploy={} daily_tp={} order_sizing={} share_fraction={} max_order_shares={} limit_slippage={} binance_momentum={} binance_ret1_min_bps={} binance_max_age_ms={}",
             cfg.btc_oracle_tiers.len(),
             cfg.btc_oracle_risk_fraction,
             cfg.btc_oracle_max_deploy_usdc,
@@ -56,12 +56,16 @@ async fn main() -> Result<()> {
             cfg.btc_oracle_order_sizing.as_str(),
             cfg.btc_oracle_share_fraction,
             cfg.btc_oracle_max_order_shares,
-            cfg.btc_oracle_limit_slippage
+            cfg.btc_oracle_limit_slippage,
+            cfg.btc_oracle_binance_momentum,
+            cfg.btc_oracle_binance_ret1_min_bps,
+            cfg.btc_oracle_binance_max_age_ms
         );
     }
 
     let cache = new_book_cache();
     let btc_price = new_btc_price_cache();
+    let binance_btc_price = new_btc_price_cache();
     let ws = MarketWs::new(cfg.market_ws_url.clone(), cache.clone());
     let _ws_task = ws.clone().run();
     let btc_ws = BtcPriceWs::new(
@@ -73,13 +77,27 @@ async fn main() -> Result<()> {
         btc_price.clone(),
     );
     let _btc_task = btc_ws.run();
+    let _binance_btc_task = if cfg.btc_oracle_binance_momentum {
+        Some(
+            BinanceBtcWs::new(
+                cfg.btc_oracle_binance_ws_url.clone(),
+                binance_btc_price.clone(),
+            )
+            .run(),
+        )
+    } else {
+        None
+    };
     let executor = Arc::new(OrderExecutor::new(&cfg).await?);
-    let mut bot = Bot::new(cfg, cache, ws, btc_price, executor).await?;
+    let mut bot = Bot::new(cfg, cache, ws, btc_price, binance_btc_price, executor).await?;
     bot.signal(json!({
         "phase": "service_start",
         "strategy": bot.cfg.strategy,
         "dry_run": bot.cfg.dry_run,
         "btc_oracle_tiers": bot.cfg.btc_oracle_tiers.len(),
+        "btc_oracle_binance_momentum": bot.cfg.btc_oracle_binance_momentum,
+        "btc_oracle_binance_ret1_min_bps": bot.cfg.btc_oracle_binance_ret1_min_bps,
+        "btc_oracle_binance_max_age_ms": bot.cfg.btc_oracle_binance_max_age_ms,
         "ts": Utc::now().timestamp(),
     }))
     .await?;
@@ -170,6 +188,10 @@ struct Config {
     btc_oracle_share_fraction: f64,
     btc_oracle_max_order_shares: f64,
     btc_oracle_limit_slippage: f64,
+    btc_oracle_binance_momentum: bool,
+    btc_oracle_binance_ws_url: String,
+    btc_oracle_binance_ret1_min_bps: f64,
+    btc_oracle_binance_max_age_ms: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -271,6 +293,13 @@ impl Config {
             btc_oracle_share_fraction: env_f64("BTC_ORACLE_SHARE_FRACTION", 0.25),
             btc_oracle_max_order_shares: env_f64("BTC_ORACLE_MAX_ORDER_SHARES", 270.0),
             btc_oracle_limit_slippage: env_f64("BTC_ORACLE_LIMIT_SLIPPAGE", 0.01),
+            btc_oracle_binance_momentum: env_bool("BTC_ORACLE_BINANCE_MOMENTUM", false),
+            btc_oracle_binance_ws_url: env(
+                "BTC_ORACLE_BINANCE_WS_URL",
+                "wss://fstream.binance.com/ws/btcusdt@aggTrade",
+            ),
+            btc_oracle_binance_ret1_min_bps: env_f64("BTC_ORACLE_BINANCE_RET1_MIN_BPS", 0.0),
+            btc_oracle_binance_max_age_ms: env_i64("BTC_ORACLE_BINANCE_MAX_AGE_MS", 1500),
         })
     }
 }
@@ -684,6 +713,94 @@ impl BtcPriceWs {
     }
 }
 
+fn json_f64(value: Option<&serde_json::Value>) -> Option<f64> {
+    match value? {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+struct BinanceBtcWs {
+    url: String,
+    cache: BtcPriceCache,
+}
+
+impl BinanceBtcWs {
+    fn new(url: String, cache: BtcPriceCache) -> Self {
+        Self { url, cache }
+    }
+
+    fn run(self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = self.connect_once().await {
+                    warn!("binance btc ws error: {e:#}");
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            }
+        })
+    }
+
+    async fn connect_once(&self) -> Result<()> {
+        let (ws_stream, _) = connect_async(&self.url).await?;
+        info!("binance btc ws connected {}", self.url);
+        let (mut write, mut read) = ws_stream.split();
+        let mut ping = tokio::time::interval(tokio::time::Duration::from_secs(15));
+
+        loop {
+            tokio::select! {
+                _ = ping.tick() => {
+                    let _ = write.send(Message::Ping(Vec::new().into())).await;
+                }
+                msg = read.next() => {
+                    let Some(msg) = msg else { return Ok(()); };
+                    match msg? {
+                        Message::Text(text) => self.handle_message(&text).await,
+                        Message::Ping(data) => { let _ = write.send(Message::Pong(data)).await; }
+                        Message::Close(_) => return Ok(()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_message(&self, text: &str) {
+        let Ok(data): Result<serde_json::Value, _> = serde_json::from_str(text) else {
+            return;
+        };
+        if let Some(tick) = Self::tick_from_message(&data) {
+            let mut cache = self.cache.write().await;
+            if cache.latest.is_none() {
+                info!(
+                    "binance btc first tick value {:.2} ts_ms={}",
+                    tick.value, tick.timestamp_ms
+                );
+            }
+            cache.remember(tick);
+        }
+    }
+
+    fn tick_from_message(data: &serde_json::Value) -> Option<BtcTick> {
+        let payload = data.get("data").unwrap_or(data);
+        let value = json_f64(payload.get("p"))?;
+        if !value.is_finite() || value <= 0.0 {
+            return None;
+        }
+        let timestamp_ms = payload
+            .get("E")
+            .and_then(|v| v.as_i64())
+            .or_else(|| payload.get("T").and_then(|v| v.as_i64()))
+            .unwrap_or_else(|| Utc::now().timestamp_millis());
+        Some(BtcTick {
+            value,
+            timestamp_ms,
+            received_ms: Utc::now().timestamp_millis(),
+        })
+    }
+}
+
 #[derive(Clone)]
 struct ClobClient {
     http: reqwest::Client,
@@ -1055,6 +1172,10 @@ struct Trade {
     btc_ret_3s_bps: Option<f64>,
     btc_ret_5s_bps: Option<f64>,
     btc_ret_10s_bps: Option<f64>,
+    binance_btc_price: Option<f64>,
+    binance_ret_1s_bps: Option<f64>,
+    binance_signed_ret_1s_bps: Option<f64>,
+    binance_price_age_ms: Option<i64>,
     winner: Option<String>,
     pnl: Option<f64>,
 }
@@ -1105,6 +1226,25 @@ struct BtcOracleTier {
     min_ret_10s_bps: Option<f64>,
 }
 
+#[derive(Clone, Debug)]
+struct BtcOracleSelected {
+    tier: BtcOracleTier,
+    tier_window_floor_sec: i64,
+    ask: f64,
+    bid: f64,
+    ask_size: f64,
+    spread: f64,
+    binance_momentum: Option<BinanceMomentumSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BinanceMomentumSnapshot {
+    price: f64,
+    ret_1s_bps: f64,
+    signed_ret_1s_bps: f64,
+    price_age_ms: i64,
+}
+
 struct TopQuote {
     ask: Option<f64>,
     ask_size: Option<f64>,
@@ -1152,6 +1292,7 @@ struct Bot {
     cache: BookCache,
     ws: MarketWs,
     btc_price: BtcPriceCache,
+    binance_btc_price: BtcPriceCache,
     market: Option<Market>,
     state: State,
     t1: HashMap<String, T1State>,
@@ -1170,6 +1311,7 @@ impl Bot {
         cache: BookCache,
         ws: MarketWs,
         btc_price: BtcPriceCache,
+        binance_btc_price: BtcPriceCache,
         executor: Arc<OrderExecutor>,
     ) -> Result<Self> {
         let client = ClobClient::new(&cfg)?;
@@ -1181,6 +1323,7 @@ impl Bot {
             cache,
             ws,
             btc_price,
+            binance_btc_price,
             market: None,
             state,
             t1: HashMap::new(),
@@ -1417,6 +1560,17 @@ impl Bot {
 
     async fn btc_ret_bps(&self, current: &BtcTick, seconds: i64) -> Option<f64> {
         self.btc_price.read().await.ret_bps(current, seconds)
+    }
+
+    async fn latest_binance_btc_tick(&self) -> Option<BtcTick> {
+        self.binance_btc_price.read().await.latest()
+    }
+
+    async fn binance_btc_ret_bps(&self, current: &BtcTick, seconds: i64) -> Option<f64> {
+        self.binance_btc_price
+            .read()
+            .await
+            .ret_bps(current, seconds)
     }
 
     fn btc_tick_age_ms(tick: &BtcTick) -> i64 {
@@ -1670,7 +1824,7 @@ impl Bot {
             ("Down", dn_quote)
         };
 
-        let mut selected: Option<(BtcOracleTier, i64, f64, f64, f64, f64)> = None;
+        let mut selected: Option<BtcOracleSelected> = None;
         let mut reject_reasons: Vec<serde_json::Value> = Vec::new();
         'tier_loop: for tier in tiers {
             let tier_window_floor_sec =
@@ -1808,18 +1962,89 @@ impl Bot {
                     continue;
                 }
             }
-            selected = Some((
+            let binance_momentum = if self.cfg.btc_oracle_binance_momentum {
+                let Some(binance_tick) = self.latest_binance_btc_tick().await else {
+                    reject_reasons.push(json!({
+                        "tier": tier.label,
+                        "tier_entry_sec": tier.entry_sec,
+                        "tier_window_floor_sec": tier_window_floor_sec,
+                        "reason": "binance_btc_price_missing",
+                        "side": side,
+                        "min_signed_ret_1s_bps": self.cfg.btc_oracle_binance_ret1_min_bps,
+                    }));
+                    continue;
+                };
+                let binance_age_ms = Self::btc_tick_age_ms(&binance_tick);
+                if binance_age_ms > self.cfg.btc_oracle_binance_max_age_ms {
+                    reject_reasons.push(json!({
+                        "tier": tier.label,
+                        "tier_entry_sec": tier.entry_sec,
+                        "tier_window_floor_sec": tier_window_floor_sec,
+                        "reason": "binance_btc_price_stale",
+                        "side": side,
+                        "binance_btc_price": binance_tick.value,
+                        "binance_price_age_ms": binance_age_ms,
+                        "binance_max_age_ms": self.cfg.btc_oracle_binance_max_age_ms,
+                        "min_signed_ret_1s_bps": self.cfg.btc_oracle_binance_ret1_min_bps,
+                    }));
+                    continue;
+                }
+                let Some(binance_ret_1s_bps) = self.binance_btc_ret_bps(&binance_tick, 1).await
+                else {
+                    reject_reasons.push(json!({
+                        "tier": tier.label,
+                        "tier_entry_sec": tier.entry_sec,
+                        "tier_window_floor_sec": tier_window_floor_sec,
+                        "reason": "binance_ret_1s_missing",
+                        "side": side,
+                        "binance_btc_price": binance_tick.value,
+                        "binance_price_age_ms": binance_age_ms,
+                        "min_signed_ret_1s_bps": self.cfg.btc_oracle_binance_ret1_min_bps,
+                    }));
+                    continue;
+                };
+                let binance_signed_ret_1s_bps =
+                    btc_oracle_signed_bps_for_side(binance_ret_1s_bps, side);
+                if !btc_oracle_binance_momentum_pass(
+                    binance_signed_ret_1s_bps,
+                    self.cfg.btc_oracle_binance_ret1_min_bps,
+                ) {
+                    reject_reasons.push(json!({
+                        "tier": tier.label,
+                        "tier_entry_sec": tier.entry_sec,
+                        "tier_window_floor_sec": tier_window_floor_sec,
+                        "reason": "binance_ret_1s_too_weak",
+                        "side": side,
+                        "binance_btc_price": binance_tick.value,
+                        "binance_ret_1s_bps": binance_ret_1s_bps,
+                        "binance_signed_ret_1s_bps": binance_signed_ret_1s_bps,
+                        "binance_price_age_ms": binance_age_ms,
+                        "min_signed_ret_1s_bps": self.cfg.btc_oracle_binance_ret1_min_bps,
+                    }));
+                    continue;
+                }
+                Some(BinanceMomentumSnapshot {
+                    price: binance_tick.value,
+                    ret_1s_bps: binance_ret_1s_bps,
+                    signed_ret_1s_bps: binance_signed_ret_1s_bps,
+                    price_age_ms: binance_age_ms,
+                })
+            } else {
+                None
+            };
+            selected = Some(BtcOracleSelected {
                 tier,
                 tier_window_floor_sec,
                 ask,
                 bid,
-                quote.ask_size.unwrap_or(0.0),
+                ask_size: quote.ask_size.unwrap_or(0.0),
                 spread,
-            ));
+                binance_momentum,
+            });
             break;
         }
 
-        let Some((tier, tier_window_floor_sec, ask, bid, ask_size, spread)) = selected else {
+        let Some(selected) = selected else {
             if self.btc_oracle_skip_logged.insert(format!(
                 "{}:{seconds_left}:{}:no_tier",
                 market.slug,
@@ -1838,6 +2063,8 @@ impl Bot {
                     "btc_ret_3s_bps": btc_ret_3s_bps,
                     "btc_ret_5s_bps": btc_ret_5s_bps,
                     "btc_ret_10s_bps": btc_ret_10s_bps,
+                    "binance_momentum_enabled": self.cfg.btc_oracle_binance_momentum,
+                    "binance_ret1_min_bps": self.cfg.btc_oracle_binance_ret1_min_bps,
                     "quote_source": quote.source,
                     "rejects": reject_reasons,
                     "ts": Utc::now().timestamp(),
@@ -1847,6 +2074,19 @@ impl Bot {
             return Ok(());
         };
 
+        let BtcOracleSelected {
+            tier,
+            tier_window_floor_sec,
+            ask,
+            bid,
+            ask_size,
+            spread,
+            binance_momentum,
+        } = selected;
+        let binance_btc_price = binance_momentum.map(|m| m.price);
+        let binance_ret_1s_bps = binance_momentum.map(|m| m.ret_1s_bps);
+        let binance_signed_ret_1s_bps = binance_momentum.map(|m| m.signed_ret_1s_bps);
+        let binance_price_age_ms = binance_momentum.map(|m| m.price_age_ms);
         let equity = (self.cfg.start_equity + self.state.realized_pnl()).max(0.0);
         let mut max_deploy = f64::INFINITY;
         if self.cfg.btc_oracle_risk_fraction > 0.0 {
@@ -1907,6 +2147,12 @@ impl Bot {
                         "btc_ret_3s_bps": btc_ret_3s_bps,
                         "btc_ret_5s_bps": btc_ret_5s_bps,
                         "btc_ret_10s_bps": btc_ret_10s_bps,
+                        "binance_momentum_enabled": self.cfg.btc_oracle_binance_momentum,
+                        "binance_btc_price": binance_btc_price,
+                        "binance_ret_1s_bps": binance_ret_1s_bps,
+                        "binance_signed_ret_1s_bps": binance_signed_ret_1s_bps,
+                        "binance_ret1_min_bps": self.cfg.btc_oracle_binance_ret1_min_bps,
+                        "binance_price_age_ms": binance_price_age_ms,
                         "ts": Utc::now().timestamp(),
                     }))
                     .await?;
@@ -1938,6 +2184,12 @@ impl Bot {
                         "btc_ret_3s_bps": btc_ret_3s_bps,
                         "btc_ret_5s_bps": btc_ret_5s_bps,
                         "btc_ret_10s_bps": btc_ret_10s_bps,
+                        "binance_momentum_enabled": self.cfg.btc_oracle_binance_momentum,
+                        "binance_btc_price": binance_btc_price,
+                        "binance_ret_1s_bps": binance_ret_1s_bps,
+                        "binance_signed_ret_1s_bps": binance_signed_ret_1s_bps,
+                        "binance_ret1_min_bps": self.cfg.btc_oracle_binance_ret1_min_bps,
+                        "binance_price_age_ms": binance_price_age_ms,
                     }),
                 )
                 .await;
@@ -1981,6 +2233,12 @@ impl Bot {
                     "btc_ret_5s_bps": btc_ret_5s_bps,
                     "btc_ret_10s_bps": btc_ret_10s_bps,
                     "btc_price_age_ms": btc_age_ms,
+                    "binance_momentum_enabled": self.cfg.btc_oracle_binance_momentum,
+                    "binance_btc_price": binance_btc_price,
+                    "binance_ret_1s_bps": binance_ret_1s_bps,
+                    "binance_signed_ret_1s_bps": binance_signed_ret_1s_bps,
+                    "binance_ret1_min_bps": self.cfg.btc_oracle_binance_ret1_min_bps,
+                    "binance_price_age_ms": binance_price_age_ms,
                     "seconds_left": seconds_left,
                     "quote_source": quote.source,
                     "mode": "shadow_fak",
@@ -2022,6 +2280,12 @@ impl Bot {
             "btc_ret_5s_bps": btc_ret_5s_bps,
             "btc_ret_10s_bps": btc_ret_10s_bps,
             "btc_price_age_ms": btc_age_ms,
+            "binance_momentum_enabled": self.cfg.btc_oracle_binance_momentum,
+            "binance_btc_price": binance_btc_price,
+            "binance_ret_1s_bps": binance_ret_1s_bps,
+            "binance_signed_ret_1s_bps": binance_signed_ret_1s_bps,
+            "binance_ret1_min_bps": self.cfg.btc_oracle_binance_ret1_min_bps,
+            "binance_price_age_ms": binance_price_age_ms,
             "seconds_left": seconds_left,
             "quote_source": quote.source,
             "mode": "limit_fak_ask_slippage",
@@ -2052,6 +2316,12 @@ impl Bot {
             "simulated": fill.simulated,
             "filled_price": fill.filled_price,
             "filled_shares": fill.filled_shares,
+            "binance_momentum_enabled": self.cfg.btc_oracle_binance_momentum,
+            "binance_btc_price": binance_btc_price,
+            "binance_ret_1s_bps": binance_ret_1s_bps,
+            "binance_signed_ret_1s_bps": binance_signed_ret_1s_bps,
+            "binance_ret1_min_bps": self.cfg.btc_oracle_binance_ret1_min_bps,
+            "binance_price_age_ms": binance_price_age_ms,
             "ts": Utc::now().timestamp(),
         }))
         .await?;
@@ -2081,6 +2351,10 @@ impl Bot {
             btc_ret_3s_bps,
             btc_ret_5s_bps,
             btc_ret_10s_bps,
+            binance_btc_price,
+            binance_ret_1s_bps,
+            binance_signed_ret_1s_bps,
+            binance_price_age_ms,
             winner: None,
             pnl: None,
         });
@@ -2102,12 +2376,18 @@ impl Bot {
             "btc_ret_3s_bps": btc_ret_3s_bps,
             "btc_ret_5s_bps": btc_ret_5s_bps,
             "btc_ret_10s_bps": btc_ret_10s_bps,
+            "binance_momentum_enabled": self.cfg.btc_oracle_binance_momentum,
+            "binance_btc_price": binance_btc_price,
+            "binance_ret_1s_bps": binance_ret_1s_bps,
+            "binance_signed_ret_1s_bps": binance_signed_ret_1s_bps,
+            "binance_ret1_min_bps": self.cfg.btc_oracle_binance_ret1_min_bps,
+            "binance_price_age_ms": binance_price_age_ms,
             "dry_run": self.cfg.dry_run,
             "ts": Utc::now().timestamp(),
         }))
         .await?;
         info!(
-            "BTC oracle {} entry {} {} @ {:.3} x {:.0} cost {:.2} bps={:.4} dry_run={}",
+            "BTC oracle {} entry {} {} @ {:.3} x {:.0} cost {:.2} bps={:.4} binance_signed_ret1={:?} dry_run={}",
             tier.label,
             market.slug,
             side,
@@ -2115,6 +2395,7 @@ impl Bot {
             filled_shares,
             filled_cost,
             bps,
+            binance_signed_ret_1s_bps,
             self.cfg.dry_run
         );
         Ok(())
@@ -2444,6 +2725,10 @@ impl Bot {
             btc_ret_3s_bps: None,
             btc_ret_5s_bps: None,
             btc_ret_10s_bps: None,
+            binance_btc_price: None,
+            binance_ret_1s_bps: None,
+            binance_signed_ret_1s_bps: None,
+            binance_price_age_ms: None,
             winner: None,
             pnl: None,
         });
@@ -2742,6 +3027,10 @@ impl Bot {
             btc_ret_3s_bps: None,
             btc_ret_5s_bps: None,
             btc_ret_10s_bps: None,
+            binance_btc_price: None,
+            binance_ret_1s_bps: None,
+            binance_signed_ret_1s_bps: None,
+            binance_price_age_ms: None,
             winner: None,
             pnl: None,
         });
@@ -3061,6 +3350,10 @@ impl Bot {
             btc_ret_3s_bps: None,
             btc_ret_5s_bps: None,
             btc_ret_10s_bps: None,
+            binance_btc_price: None,
+            binance_ret_1s_bps: None,
+            binance_signed_ret_1s_bps: None,
+            binance_price_age_ms: None,
             winner: None,
             pnl: None,
         });
@@ -3247,6 +3540,20 @@ fn btc_oracle_buy_limit_price(ask: f64, slippage: f64) -> f64 {
         0.0
     };
     (safe_ask + safe_slippage).clamp(0.0, 0.999)
+}
+
+fn btc_oracle_signed_bps_for_side(ret_bps: f64, side: &str) -> f64 {
+    if side.eq_ignore_ascii_case("Up") {
+        ret_bps
+    } else {
+        -ret_bps
+    }
+}
+
+fn btc_oracle_binance_momentum_pass(signed_ret_1s_bps: f64, min_signed_ret_1s_bps: f64) -> bool {
+    signed_ret_1s_bps.is_finite()
+        && min_signed_ret_1s_bps.is_finite()
+        && signed_ret_1s_bps >= min_signed_ret_1s_bps
 }
 
 #[derive(Debug, Clone)]
@@ -3567,6 +3874,41 @@ mod tests {
         assert_eq!(btc_oracle_buy_limit_price(0.90, 0.01), 0.91);
         assert_eq!(btc_oracle_buy_limit_price(0.90, -0.01), 0.90);
         assert_eq!(btc_oracle_buy_limit_price(0.995, 0.01), 0.999);
+    }
+
+    #[test]
+    fn parses_binance_aggtrade_tick() {
+        let raw = json!({
+            "e": "aggTrade",
+            "E": 1783037693000_i64,
+            "s": "BTCUSDT",
+            "p": "60300.50"
+        });
+        let tick = BinanceBtcWs::tick_from_message(&raw).expect("binance tick should parse");
+        assert_eq!(tick.value, 60300.50);
+        assert_eq!(tick.timestamp_ms, 1783037693000_i64);
+
+        let combined = json!({
+            "stream": "btcusdt@aggTrade",
+            "data": {
+                "E": 1783037694000_i64,
+                "p": "60301.25"
+            }
+        });
+        let tick =
+            BinanceBtcWs::tick_from_message(&combined).expect("combined binance tick should parse");
+        assert_eq!(tick.value, 60301.25);
+        assert_eq!(tick.timestamp_ms, 1783037694000_i64);
+    }
+
+    #[test]
+    fn binance_ret1_filter_uses_selected_side() {
+        assert_eq!(btc_oracle_signed_bps_for_side(0.25, "Up"), 0.25);
+        assert_eq!(btc_oracle_signed_bps_for_side(0.25, "Down"), -0.25);
+        assert_eq!(btc_oracle_signed_bps_for_side(-0.25, "Down"), 0.25);
+        assert!(btc_oracle_binance_momentum_pass(0.0, 0.0));
+        assert!(btc_oracle_binance_momentum_pass(0.05, 0.0));
+        assert!(!btc_oracle_binance_momentum_pass(-0.01, 0.0));
     }
 
     #[test]

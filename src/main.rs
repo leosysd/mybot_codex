@@ -296,7 +296,7 @@ impl Config {
             btc_oracle_binance_momentum: env_bool("BTC_ORACLE_BINANCE_MOMENTUM", false),
             btc_oracle_binance_ws_url: env(
                 "BTC_ORACLE_BINANCE_WS_URL",
-                "wss://fstream.binance.com/ws/btcusdt@aggTrade",
+                "wss://fstream.binance.com/ws/btcusdt@trade",
             ),
             btc_oracle_binance_ret1_min_bps: env_f64("BTC_ORACLE_BINANCE_RET1_MIN_BPS", 0.0),
             btc_oracle_binance_max_age_ms: env_i64("BTC_ORACLE_BINANCE_MAX_AGE_MS", 1500),

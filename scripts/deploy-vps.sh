@@ -80,7 +80,7 @@ set_env BTC_ORACLE_RISK_FRACTION 0.25
 set_env BTC_ORACLE_MAX_DEPLOY_USDC 270
 set_env BTC_ORACLE_DAILY_TAKE_PROFIT 800
 set_env BTC_ORACLE_BINANCE_MOMENTUM 0
-set_env BTC_ORACLE_BINANCE_WS_URL wss://fstream.binance.com/ws/btcusdt@aggTrade
+set_env BTC_ORACLE_BINANCE_WS_URL wss://fstream.binance.com/ws/btcusdt@trade
 set_env BTC_ORACLE_BINANCE_RET1_MIN_BPS 0
 set_env BTC_ORACLE_BINANCE_MAX_AGE_MS 1500
 set_env BTC_LADDER_EARLY_SECS 60
